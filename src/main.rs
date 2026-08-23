@@ -728,77 +728,53 @@ wlgrid — a live grid of window and display previews, for picking one
 
 usage: wlgrid [options]
 
-  --format tsv|json|portal  how to report the pick [tsv]; see FORMATS
+  --format tsv|json|portal  how to report the pick [tsv]
   --live all|current|none   which tiles keep updating live [all]
-                            (display tiles are always a single snapshot)
+                            (displays are always a single snapshot)
   --fps N                   cap on live updates per tile per second [12]
-  --no-outputs              windows only; by default whole displays are
-                            included too, labelled \"NAME · display\"
+  --no-outputs              windows only; displays are included by default
   --hide-labels             draw an icon-only grid
   --font FAMILY             label font family [Berkeley Mono]
   --font-size PX            label size in logical px [13.3]
-  --timeout SECS            exit after SECS regardless [off]
-                            (a safety valve: the overlay grabs the keyboard)
-  -v, --verbose             phase timings, the tile list, and capture stats
+  --timeout SECS            exit anyway after SECS, in case the keyboard
+                            grab ever traps you [off]
+  -v, --verbose             phase timings, tile list and capture stats
   -h, --help                this
 
-keys: arrows, hjkl, or Tab/Shift+Tab move; Home/End jump; Enter picks;
+keys: arrows, hjkl or Tab/Shift+Tab move; Home/End jump; Enter picks;
       Escape or q cancels
 
-The pick goes to stdout, nothing does if you cancel; exit status is 0 for a
-pick and 1 for a cancel.
+The pick goes to stdout and nothing does if you cancel, so exit status is
+0 for a pick and 1 for a cancel. Acting on it is the caller's job.
 
-FORMATS
+formats:
 
-  tsv     One line of tab-separated columns; the default, meant for
-          `IFS=$'\\t' read` or cut(1):
+  tsv     TYPE<TAB>ID<TAB>TOPLEVEL_ID<TAB>APP<TAB>TITLE, e.g.
 
-            TYPE<TAB>ID<TAB>TOPLEVEL_ID<TAB>APP<TAB>TITLE
+            window	1234	f0e1d2c3b4a59687	firefox	Wikipedia
+            output	HDMI-A-1		display	HDMI-A-1
 
-            window	68	8e38849641c86be05bb1a68c163a1c41	dev.zed.Zed	jobchi
-            output	DP-1		display	DP-1
+          ID is the thing to act on: a sway con_id, or the display name.
+          TOPLEVEL_ID is the ext-foreign-toplevel-list-v1 identifier that
+          capture tools address a window by (grim -T, the desktop portal),
+          empty for a display.
 
-          TYPE is \"window\" or \"output\", so a caller knows which kind of
-          thing it got. ID is the one to act on: a sway con_id for a
-          window, the name for a display. TOPLEVEL_ID is the
-          ext-foreign-toplevel-list-v1 identifier, which is what capture
-          tools address a window by (grim -T, the desktop portal); it is
-          empty for a display. APP is the app id, or \"display\".
+  json    the same fields as one object, every key always present, for jq
 
-  json    The same record as one object, with every key always present so
-          jq can rely on it:
-
-            {\"type\":\"window\",\"con_id\":68,\"toplevel_id\":\"8e3884...\",
-             \"output\":null,\"app\":\"dev.zed.Zed\",\"title\":\"jobchi\"}
-
-  portal  What xdg-desktop-portal-wlr's \"simple\" chooser reads, which lets
-          wlgrid be the picker a screencast pops up (getDisplayMedia in a
-          browser, for instance) with live previews of both windows and
-          whole displays:
-
-            Window: 8e38849641c86be05bb1a68c163a1c41
-            Monitor: DP-1
-
-          Put this in ~/.config/xdg-desktop-portal-wlr/config:
+  portal  \"Window: TOPLEVEL_ID\" or \"Monitor: NAME\", what
+          xdg-desktop-portal-wlr's simple chooser reads:
 
             [screencast]
             chooser_type=simple
             chooser_cmd=wlgrid --format portal
 
-EXAMPLES, on sway
+focusing on sway:
 
-  Focus a window:
-    swaymsg \"[con_id=$(wlgrid --no-outputs | cut -f2)] focus\"
-
-  Focus a window or move to a display, whichever was picked:
-    IFS=$'\\t' read -r type id toplevel app title < <(wlgrid) &&
-      case $type in
-        window) swaymsg \"[con_id=$id] focus\" ;;
-        output) swaymsg \"focus output $id\" ;;
-      esac
-
-  Screenshot whatever you pick:
-    grim -T \"$(wlgrid --no-outputs | cut -f3)\" shot.png
+  IFS=$'\\t' read -r type id toplevel app title < <(wlgrid) &&
+    case $type in
+      window) swaymsg \"[con_id=$id] focus\" ;;
+      output) swaymsg \"focus output $id\" ;;
+    esac
 ";
 
 struct Args {
