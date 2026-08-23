@@ -3,7 +3,8 @@
 A window switcher for wlroots compositors: a grid overlay of **live** window
 previews that looks like a rofi theme, and focuses the window you pick.
 
-It replaces a `wlthumbs | rofi` pipeline. The difference is that no thumbnails
+It replaces a `wlthumbs | rofi` pipeline, and doubles as a screencast source
+picker for the desktop portal. The difference is that no thumbnails
 exist: each window is captured straight into a `wl_shm` buffer that is handed to
 its own `wl_subsurface`, and `wp_viewporter` tells the compositor which rectangle
 to scale it into. There is no image encoding, no scaler, and no full-resolution
@@ -48,19 +49,43 @@ wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
 - `--timeout SECS` exits after a deadline (an escape hatch: the overlay takes an
   exclusive keyboard grab)
 
-Bind it in sway:
+wlgrid is a chooser: it reports what you picked and leaves acting on it to the
+caller. The pick goes to stdout, nothing does if you cancel, and the exit status
+is 0 for a pick and 1 for a cancel.
 
+```sh
+# sway scripting: act on the con_id
+swaymsg "[con_id=$(wlgrid | cut -f2)] focus"
+
+# or let wlgrid do it, for a bare keybinding
+bindsym $mod+Tab exec wlgrid --focus
 ```
-bindsym $mod+Tab exec wlgrid
+
+Three formats, because the identifiers different consumers need differ:
+
+| `--format` | output |
+|---|---|
+| `tsv` (default) | `TYPE⇥ID⇥TOPLEVEL_ID⇥APP⇥TITLE` — `ID` is the sway `con_id`, or the output name for a display; `TOPLEVEL_ID` is the ext-foreign-toplevel-list-v1 identifier that `grim -T` and the portal capture by |
+| `json` | the same record with every key always present, for `jq` |
+| `portal` | `Monitor: NAME` or `Window: TOPLEVEL_ID` |
+
+`portal` is exactly what xdg-desktop-portal-wlr's `simple` chooser reads, so
+wlgrid can be the picker for `getDisplayMedia` and friends — with live previews
+of both windows and displays:
+
+```ini
+[screencast]
+chooser_type=simple
+chooser_cmd=wlgrid --format portal
 ```
 
 | key | |
 |---|---|
-| `→` `←` / `Tab` `Shift+Tab` | next / previous window |
-| `↑` `↓` | move a row |
+| `→` `←` / `l` `h` / `Tab` `Shift+Tab` | next / previous tile |
+| `↓` `↑` / `j` `k` | move a row |
 | `Home` `End` | first / last |
-| `Enter` | focus the selection |
-| `Escape` / `q` | cancel, leaving focus alone |
+| `Enter` | pick |
+| `Escape` / `q` | cancel |
 
 Navigation reads raw evdev keycodes, so it is layout-independent — but it also
 means virtual-keyboard clients such as `wtype` (which invent their own keymap)

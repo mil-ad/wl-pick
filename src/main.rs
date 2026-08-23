@@ -10,6 +10,7 @@
 
 mod shm;
 mod sway;
+mod target;
 mod text;
 mod theme;
 
@@ -24,7 +25,7 @@ use wayland_client::protocol::{
     wl_callback,
     wl_compositor::WlCompositor,
     wl_keyboard::{self, WlKeyboard},
-    wl_output,
+    wl_output::{self, WlOutput},
     wl_registry::WlRegistry,
     wl_seat::{self, WlSeat},
     wl_shm::{self, WlShm},
@@ -43,6 +44,7 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
 use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+    ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
 };
 use wayland_protocols::ext::image_copy_capture::v1::client::{
     ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
@@ -57,6 +59,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 
+use target::{Kind, Target};
 use theme::{Layout, Rect, Theme, fit_centred};
 
 // evdev keycodes: physical positions, so navigation works on any keyboard layout
@@ -64,6 +67,11 @@ use theme::{Layout, Rect, Theme, fit_centred};
 const KEY_ESC: u32 = 1;
 const KEY_TAB: u32 = 15;
 const KEY_Q: u32 = 16;
+// hjkl, by physical position: the same keys as vim on a qwerty layout.
+const KEY_H: u32 = 35;
+const KEY_J: u32 = 36;
+const KEY_K: u32 = 37;
+const KEY_L: u32 = 38;
 const KEY_ENTER: u32 = 28;
 const KEY_LEFTSHIFT: u32 = 42;
 const KEY_RIGHTSHIFT: u32 = 54;
@@ -76,6 +84,17 @@ const KEY_END: u32 = 107;
 const KEY_DOWN: u32 = 108;
 
 /// One window: its sway identity, its capture plumbing, and its subsurface.
+/// How the pick is written to stdout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// type, id, toplevel id, app, title — one tab-separated line.
+    Tsv,
+    /// The same record as a JSON object.
+    Json,
+    /// What xdg-desktop-portal-wlr's `simple` chooser accepts.
+    Portal,
+}
+
 /// Which tiles keep updating after the first frame.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Live {
@@ -96,7 +115,7 @@ struct Slot {
 
 #[allow(dead_code)] // `handle` is held to keep the toplevel alive
 struct Tile {
-    win: sway::Win,
+    target: Target,
     handle: Option<ExtForeignToplevelHandleV1>,
 
     session: Option<ExtImageCopyCaptureSessionV1>,
@@ -126,9 +145,9 @@ struct Tile {
 }
 
 impl Tile {
-    fn new(win: sway::Win) -> Self {
+    fn new(target: Target) -> Self {
         Self {
-            win,
+            target,
             handle: None,
             session: None,
             frame: None,
@@ -178,6 +197,9 @@ struct App {
     /// Toplevel handles as the compositor announces them, paired with the
     /// identifier that joins them to sway's tree.
     toplevels: Vec<(ExtForeignToplevelHandleV1, String)>,
+    /// Displays, paired with the name the compositor gives them (wl_output v4).
+    outputs: Vec<(WlOutput, String)>,
+    output_src_mgr: Option<ExtOutputImageCaptureSourceManagerV1>,
     tiles: Vec<Tile>,
 
     theme: Theme,
@@ -195,7 +217,7 @@ struct App {
     configured: bool,
 
     quit: bool,
-    activate: Option<i64>,
+    activate: Option<Target>,
     /// Frame-callback ticks, for diagnosing the live clock.
     ticks: u32,
     releases: u32,
@@ -208,16 +230,16 @@ impl App {
     fn new(
         globals: &GlobalList,
         qh: &QueueHandle<Self>,
-        wins: Vec<sway::Win>,
+        targets: Vec<Target>,
         theme: Theme,
         live: Live,
         fps: u32,
         scale: i32,
     ) -> Result<Self, Box<dyn Error>> {
-        let layout = Layout::new(&theme, wins.len() as i32);
+        let layout = Layout::new(&theme, targets.len() as i32);
         // Bind everything up front so a compositor missing a protocol fails
         // here, with a name, rather than halfway through a capture.
-        let app = Self {
+        let mut app = Self {
             compositor: globals.bind(qh, 1..=6, ())?,
             subcompositor: globals.bind(qh, 1..=1, ())?,
             shm: globals.bind(qh, 1..=1, ())?,
@@ -226,7 +248,10 @@ impl App {
             copy_mgr: globals.bind(qh, 1..=1, ())?,
             src_mgr: globals.bind(qh, 1..=1, ())?,
             toplevels: Vec::new(),
-            tiles: wins.into_iter().map(Tile::new).collect(),
+            outputs: Vec::new(),
+            // Optional: a compositor without it simply gets no display tiles.
+            output_src_mgr: globals.bind(qh, 1..=1, ()).ok(),
+            tiles: targets.into_iter().map(Tile::new).collect(),
             theme,
             layout,
             live,
@@ -247,6 +272,16 @@ impl App {
             pool_bytes: 0,
         };
         let _: ExtForeignToplevelListV1 = globals.bind(qh, 1..=1, ())?;
+        // One wl_output per display, bound at v4 so it tells us its name.
+        for global in globals.contents().clone_list() {
+            if global.interface == WlOutput::interface().name {
+                let version = global.version.min(4);
+                if version >= 4 {
+                    let output: WlOutput = globals.registry().bind(global.name, version, qh, ());
+                    app.outputs.push((output, String::new()));
+                }
+            }
+        }
         let _: WlSeat = globals.bind(qh, 1..=7, ())?;
         Ok(app)
     }
@@ -256,19 +291,33 @@ impl App {
     /// constraints arrive together instead of costing a round trip each.
     fn open_sessions(&mut self, qh: &QueueHandle<Self>) {
         for (i, tile) in self.tiles.iter_mut().enumerate() {
-            let Some(handle) = self
-                .toplevels
-                .iter()
-                .find(|(_, id)| !id.is_empty() && *id == tile.win.ft_id)
-                .map(|(h, _)| h.clone())
-            else {
-                // No identifier match: the tile stays label-only, and must not
-                // be waited on.
+            // A window's source comes from its toplevel handle, a display's from
+            // its wl_output; everything after that is identical.
+            let source: Option<ExtImageCaptureSourceV1> = match tile.target.kind {
+                Kind::Window => self
+                    .toplevels
+                    .iter()
+                    .find(|(_, id)| !id.is_empty() && *id == tile.target.ft_id)
+                    .map(|(handle, _)| {
+                        tile.handle = Some(handle.clone());
+                        self.src_mgr.create_source(handle, qh, ())
+                    }),
+                Kind::Output => self
+                    .outputs
+                    .iter()
+                    .find(|(_, n)| *n == tile.target.id)
+                    .and_then(|(output, _)| {
+                        self.output_src_mgr
+                            .as_ref()
+                            .map(|mgr| mgr.create_source(output, qh, ()))
+                    }),
+            };
+            let Some(source) = source else {
+                // Nothing to capture from: the tile stays label-only, and must
+                // not be waited on.
                 tile.settled = true;
                 continue;
             };
-            let source: ExtImageCaptureSourceV1 = self.src_mgr.create_source(&handle, qh, ());
-            tile.handle = Some(handle);
             tile.session = Some(self.copy_mgr.create_session(
                 &source,
                 ext_image_copy_capture_manager_v1::Options::empty(),
@@ -289,7 +338,6 @@ impl App {
     /// touching it again.
     fn start_captures(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
         const PAGE: usize = 4096;
-        let slots = if self.live == Live::None { 1 } else { 2 };
         let mut total = 0usize;
         let mut offsets: Vec<Vec<usize>> = Vec::with_capacity(self.tiles.len());
         for tile in &mut self.tiles {
@@ -314,6 +362,13 @@ impl App {
                 tile.settled = true;
                 continue;
             }
+            // Only a tile that will be re-captured needs a second buffer, and a
+            // display's is the size of the whole screen.
+            let slots = if self.live == Live::None || tile.target.kind == Kind::Output {
+                1
+            } else {
+                2
+            };
             let last = offsets.last_mut().expect("just pushed");
             for _ in 0..slots {
                 last.push(total);
@@ -426,6 +481,11 @@ impl App {
         let now = Instant::now();
         for i in 0..self.tiles.len() {
             if self.live == Live::Current && i != self.sel {
+                continue;
+            }
+            // A display tile shows this overlay, which shows the display tile:
+            // refreshing it never settles and costs a whole screen per frame.
+            if self.tiles[i].target.kind == Kind::Output {
                 continue;
             }
             let t = &self.tiles[i];
@@ -587,14 +647,14 @@ impl App {
             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => self.shift = true,
             KEY_ESC | KEY_Q => self.quit = true,
             KEY_ENTER | KEY_KPENTER => {
-                self.activate = self.tiles.get(self.sel).map(|t| t.win.con_id);
+                self.activate = self.tiles.get(self.sel).map(|t| t.target.clone());
                 self.quit = true;
             }
             KEY_TAB if self.shift => self.move_sel(-1),
-            KEY_TAB | KEY_RIGHT => self.move_sel(1),
-            KEY_LEFT => self.move_sel(-1),
-            KEY_DOWN => self.move_row(1),
-            KEY_UP => self.move_row(-1),
+            KEY_TAB | KEY_RIGHT | KEY_L => self.move_sel(1),
+            KEY_LEFT | KEY_H => self.move_sel(-1),
+            KEY_DOWN | KEY_J => self.move_row(1),
+            KEY_UP | KEY_K => self.move_row(-1),
             KEY_HOME => {
                 self.sel = 0;
                 self.paint();
@@ -656,8 +716,54 @@ fn pump(
     Ok(())
 }
 
+const HELP: &str = "\
+wlgrid — a live grid of window and display previews, for picking one
+
+usage: wlgrid [options]
+
+  --format tsv|json|portal  how to report the pick [tsv]
+  --focus                   also focus the pick, via sway [off]
+  --live all|current|none   which tiles keep updating live [all]
+                            (display tiles are always a single snapshot)
+  --fps N                   cap on live updates per tile per second [12]
+  --no-outputs              windows only; by default whole displays are
+                            included too, labelled \"NAME · display\"
+  --hide-labels             draw an icon-only grid
+  --font FAMILY             label font family [Berkeley Mono]
+  --font-size PX            label size in logical px [13.3]
+  --timeout SECS            exit after SECS regardless [off]
+                            (a safety valve: the overlay grabs the keyboard)
+  -v, --verbose             phase timings, the tile list, and capture stats
+  -h, --help                this
+
+keys: arrows, hjkl, or Tab/Shift+Tab move; Home/End jump; Enter picks;
+      Escape or q cancels
+
+The pick goes to stdout, nothing does if you cancel; exit status is 0 for a
+pick and 1 for a cancel.
+
+  tsv     TYPE<TAB>ID<TAB>TOPLEVEL_ID<TAB>APP<TAB>TITLE
+          TYPE is \"window\" or \"output\". ID is the sway con_id, or the
+          output name for a display. TOPLEVEL_ID is the
+          ext-foreign-toplevel-list-v1 identifier, which is what tools like
+          grim -T capture by; it is empty for displays.
+  json    the same record, every key always present, for jq
+  portal  \"Monitor: NAME\" or \"Window: TOPLEVEL_ID\", i.e. exactly what
+          xdg-desktop-portal-wlr's simple chooser reads:
+
+            [screencast]
+            chooser_type=simple
+            chooser_cmd=wlgrid --format portal
+
+examples:
+  swaymsg \"[con_id=$(wlgrid | cut -f2)] focus\"
+  wlgrid --format json | jq -r .title
+";
+
 struct Args {
-    print: bool,
+    format: Format,
+    focus: bool,
+    outputs: bool,
     verbose: bool,
     hide_labels: bool,
     font: Option<String>,
@@ -669,7 +775,9 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
-        print: false,
+        format: Format::Tsv,
+        focus: false,
+        outputs: true,
         verbose: false,
         hide_labels: false,
         font: None,
@@ -681,7 +789,17 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--print" => args.print = true,
+            "--focus" => args.focus = true,
+            "--format" => {
+                args.format = match it.next().ok_or("--format needs tsv|json|portal")?.as_str() {
+                    "tsv" => Format::Tsv,
+                    "json" => Format::Json,
+                    "portal" => Format::Portal,
+                    other => return Err(format!("bad --format: {other}")),
+                }
+            }
+            "--outputs" => args.outputs = true,
+            "--no-outputs" => args.outputs = false,
             "-v" | "--verbose" => args.verbose = true,
             "--hide-labels" => args.hide_labels = true,
             "--live" => {
@@ -707,11 +825,7 @@ fn parse_args() -> Result<Args, String> {
                 args.timeout = Some(Duration::from_secs_f64(secs));
             }
             "-h" | "--help" => {
-                println!(
-                    "usage: wlgrid [--print] [--verbose] [--hide-labels] \
-                     [--font FAMILY] [--font-size PX] \
-                     [--live all|current|none] [--fps N] [--timeout SECS]"
-                );
+                print!("{HELP}");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -745,18 +859,17 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let start = Instant::now();
     let mut phases = Phases::new(args.verbose);
     let mut sway_conn = swayipc::Connection::new()?;
-    let wins = sway::windows(&mut sway_conn)?;
-    if wins.is_empty() {
+    let mut targets = sway::windows(&mut sway_conn)?;
+    let scale = sway::scale(&mut sway_conn)?;
+    if args.outputs {
+        // Displays go last, after the windows, so window positions stay stable.
+        for output in sway_conn.get_outputs()?.iter().filter(|o| o.active) {
+            targets.push(Target::output(output.name.clone()));
+        }
+    }
+    if targets.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
-    let scale = sway_conn
-        .get_outputs()?
-        .iter()
-        .filter(|o| o.active)
-        .map(|o| o.scale.unwrap_or(1.0).ceil() as i32)
-        .max()
-        .unwrap_or(1)
-        .max(1);
 
     phases.mark("sway-tree");
 
@@ -777,10 +890,10 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     // rasterising, and the captures below are ~55ms of waiting on the
     // compositor, so the two overlap almost exactly.
     let label_job = theme.labels.then(|| {
-        let layout = Layout::new(&theme, wins.len() as i32);
+        let layout = Layout::new(&theme, targets.len() as i32);
         let box_w = layout.label(0).map(|r| r.w).unwrap_or(theme.tile_w);
         text::spawn(
-            wins.iter().map(sway::Win::label).collect(),
+            targets.iter().map(Target::label).collect(),
             theme.font.clone(),
             theme.font_px * scale as f32,
             (theme.line_h * scale) as f32,
@@ -791,7 +904,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
     let qh = queue.handle();
-    let mut app = App::new(&globals, &qh, wins, theme, args.live, args.fps, scale)?;
+    let mut app = App::new(&globals, &qh, targets, theme, args.live, args.fps, scale)?;
 
     // Two roundtrips: one for the toplevel list, one for each handle's state.
     queue.roundtrip(&mut app)?;
@@ -816,9 +929,8 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         let matched = app.tiles.iter().filter(|t| t.handle.is_some()).count();
         for (i, t) in app.tiles.iter().enumerate() {
             eprintln!(
-                "  [{i}] con_id={} {}{}",
-                t.win.con_id,
-                t.win.label(),
+                "  [{i}] {}{}",
+                t.target.tsv(),
                 if t.ready { "" } else { "  (no thumbnail)" }
             );
         }
@@ -862,12 +974,26 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         );
     }
 
-    if let Some(con_id) = app.activate {
-        if args.print {
-            println!("{con_id}");
-        } else {
-            sway::focus(&mut sway_conn, con_id)?;
-        }
+    // wlgrid is a chooser: it reports the pick and leaves acting on it to the
+    // caller (--focus is a convenience for a bare keybinding).
+    let Some(target) = app.activate else {
+        return Ok(ExitCode::FAILURE); // cancelled: nothing on stdout
+    };
+    match args.format {
+        Format::Tsv => println!("{}", target.tsv()),
+        Format::Json => println!("{}", target.json()),
+        Format::Portal => match target.portal() {
+            Some(line) => println!("{line}"),
+            None => {
+                // The portal can only name a window by its foreign-toplevel
+                // identifier, and this one has none; silence means declined.
+                eprintln!("wlgrid: {:?} has no toplevel identifier", target.title);
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+    }
+    if args.focus {
+        sway::focus(&mut sway_conn, &target)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -981,7 +1107,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 if tile.frames == 0 {
                     eprintln!(
                         "wlgrid: capture failed for {:?} ({reason:?})",
-                        tile.win.title
+                        tile.target.title
                     );
                     tile.failed = true;
                 }
@@ -1014,6 +1140,25 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
             }
             zwlr_layer_surface_v1::Event::Closed => app.quit = true,
             _ => {}
+        }
+    }
+}
+
+/// wl_output tells us its name (v4), which is how a display tile is labelled
+/// and how `focus output NAME` finds it again.
+impl Dispatch<WlOutput, ()> for App {
+    fn event(
+        app: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Name { name } = event
+            && let Some(entry) = app.outputs.iter_mut().find(|(o, _)| o == output)
+        {
+            entry.1 = name;
         }
     }
 }
@@ -1072,6 +1217,7 @@ delegate_noop!(App: ZwlrLayerShellV1);
 delegate_noop!(App: ExtImageCopyCaptureManagerV1);
 delegate_noop!(App: ExtForeignToplevelImageCaptureSourceManagerV1);
 delegate_noop!(App: ExtImageCaptureSourceV1);
+delegate_noop!(App: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(App: ignore WlSurface);
 
 // The chrome's own buffers: two slots alternating on keypresses, so their
