@@ -1,7 +1,7 @@
-//! wlgrid shows a thumbnail grid of every open window as a layer-shell overlay
-//! and focuses the one you pick. It replaces a wlthumbs + rofi pipeline, so it
-//! keeps that pipeline's contract: sway owns the window list and the focusing,
-//! and the look comes straight from the rofi theme (see theme.rs).
+//! wlgrid shows a live grid of every window and display as a layer-shell overlay
+//! and reports which one you picked. That is all it does: acting on the choice
+//! belongs to whatever called it. It replaces a wlthumbs + rofi pipeline, so the
+//! look comes straight from that rofi theme (see theme.rs).
 //!
 //! The pixels never pass through this process. Each window is captured into an
 //! shm buffer handed straight to a subsurface, with wp_viewporter telling the
@@ -728,8 +728,7 @@ wlgrid — a live grid of window and display previews, for picking one
 
 usage: wlgrid [options]
 
-  --format tsv|json|portal  how to report the pick [tsv]
-  --focus                   also focus the pick, via sway [off]
+  --format tsv|json|portal  how to report the pick [tsv]; see FORMATS
   --live all|current|none   which tiles keep updating live [all]
                             (display tiles are always a single snapshot)
   --fps N                   cap on live updates per tile per second [12]
@@ -749,27 +748,61 @@ keys: arrows, hjkl, or Tab/Shift+Tab move; Home/End jump; Enter picks;
 The pick goes to stdout, nothing does if you cancel; exit status is 0 for a
 pick and 1 for a cancel.
 
-  tsv     TYPE<TAB>ID<TAB>TOPLEVEL_ID<TAB>APP<TAB>TITLE
-          TYPE is \"window\" or \"output\". ID is the sway con_id, or the
-          output name for a display. TOPLEVEL_ID is the
-          ext-foreign-toplevel-list-v1 identifier, which is what tools like
-          grim -T capture by; it is empty for displays.
-  json    the same record, every key always present, for jq
-  portal  \"Monitor: NAME\" or \"Window: TOPLEVEL_ID\", i.e. exactly what
-          xdg-desktop-portal-wlr's simple chooser reads:
+FORMATS
+
+  tsv     One line of tab-separated columns; the default, meant for
+          `IFS=$'\\t' read` or cut(1):
+
+            TYPE<TAB>ID<TAB>TOPLEVEL_ID<TAB>APP<TAB>TITLE
+
+            window	68	8e38849641c86be05bb1a68c163a1c41	dev.zed.Zed	jobchi
+            output	DP-1		display	DP-1
+
+          TYPE is \"window\" or \"output\", so a caller knows which kind of
+          thing it got. ID is the one to act on: a sway con_id for a
+          window, the name for a display. TOPLEVEL_ID is the
+          ext-foreign-toplevel-list-v1 identifier, which is what capture
+          tools address a window by (grim -T, the desktop portal); it is
+          empty for a display. APP is the app id, or \"display\".
+
+  json    The same record as one object, with every key always present so
+          jq can rely on it:
+
+            {\"type\":\"window\",\"con_id\":68,\"toplevel_id\":\"8e3884...\",
+             \"output\":null,\"app\":\"dev.zed.Zed\",\"title\":\"jobchi\"}
+
+  portal  What xdg-desktop-portal-wlr's \"simple\" chooser reads, which lets
+          wlgrid be the picker a screencast pops up (getDisplayMedia in a
+          browser, for instance) with live previews of both windows and
+          whole displays:
+
+            Window: 8e38849641c86be05bb1a68c163a1c41
+            Monitor: DP-1
+
+          Put this in ~/.config/xdg-desktop-portal-wlr/config:
 
             [screencast]
             chooser_type=simple
             chooser_cmd=wlgrid --format portal
 
-examples:
-  swaymsg \"[con_id=$(wlgrid | cut -f2)] focus\"
-  wlgrid --format json | jq -r .title
+EXAMPLES, on sway
+
+  Focus a window:
+    swaymsg \"[con_id=$(wlgrid --no-outputs | cut -f2)] focus\"
+
+  Focus a window or move to a display, whichever was picked:
+    IFS=$'\\t' read -r type id toplevel app title < <(wlgrid) &&
+      case $type in
+        window) swaymsg \"[con_id=$id] focus\" ;;
+        output) swaymsg \"focus output $id\" ;;
+      esac
+
+  Screenshot whatever you pick:
+    grim -T \"$(wlgrid --no-outputs | cut -f3)\" shot.png
 ";
 
 struct Args {
     format: Format,
-    focus: bool,
     outputs: bool,
     verbose: bool,
     hide_labels: bool,
@@ -783,7 +816,6 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         format: Format::Tsv,
-        focus: false,
         outputs: true,
         verbose: false,
         hide_labels: false,
@@ -796,7 +828,6 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--focus" => args.focus = true,
             "--format" => {
                 args.format = match it.next().ok_or("--format needs tsv|json|portal")?.as_str() {
                     "tsv" => Format::Tsv,
@@ -865,15 +896,21 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     let start = Instant::now();
     let mut phases = Phases::new(args.verbose);
-    let mut sway_conn = swayipc::Connection::new()?;
-    let mut targets = sway::windows(&mut sway_conn)?;
-    let scale = sway::scale(&mut sway_conn)?;
-    if args.outputs {
-        // Displays go last, after the windows, so window positions stay stable.
-        for output in sway_conn.get_outputs()?.iter().filter(|o| o.active) {
-            targets.push(Target::output(output.name.clone()));
+    // The IPC connection is only needed to build the list, so it is closed again
+    // before the overlay maps.
+    let (targets, scale) = {
+        let mut sway = swayipc::Connection::new()?;
+        let mut targets = sway::windows(&mut sway)?;
+        let scale = sway::scale(&mut sway)?;
+        if args.outputs {
+            // Displays go last, after the windows, so window positions are
+            // stable as windows come and go.
+            for output in sway.get_outputs()?.iter().filter(|o| o.active) {
+                targets.push(Target::output(output.name.clone()));
+            }
         }
-    }
+        (targets, scale)
+    };
     if targets.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
@@ -981,8 +1018,8 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         );
     }
 
-    // wlgrid is a chooser: it reports the pick and leaves acting on it to the
-    // caller (--focus is a convenience for a bare keybinding).
+    // wlgrid is a chooser: it reports the pick, and what that means is the
+    // caller's business.
     if args.verbose {
         eprintln!("wlgrid: {}", app.quit_why);
     }
@@ -1001,9 +1038,6 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
                 return Ok(ExitCode::FAILURE);
             }
         },
-    }
-    if args.focus {
-        sway::focus(&mut sway_conn, &target)?;
     }
     Ok(ExitCode::SUCCESS)
 }

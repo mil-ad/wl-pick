@@ -1,7 +1,9 @@
-//! sway stays the source of truth for the window list and for focusing, exactly
-//! as the shell script this replaces did (`swaymsg -t get_tree` + `[con_id=N]
-//! focus`). The Wayland side only supplies pixels; the join between the two is
+//! sway is the source of truth for the window list (`swaymsg -t get_tree`); the
+//! Wayland side only supplies pixels. The join between the two is
 //! `foreign_toplevel_identifier`, which sway reports per view.
+//!
+//! Acting on the choice is deliberately not here: wlgrid reports what was picked
+//! and the caller decides what that means.
 
 use swayipc::{Connection, Node, NodeType};
 
@@ -46,16 +48,4 @@ pub fn scale(conn: &mut Connection) -> Result<i32, swayipc::Error> {
         .max()
         .unwrap_or(1)
         .max(1))
-}
-
-pub fn focus(conn: &mut Connection, target: &Target) -> Result<(), swayipc::Error> {
-    let cmd = match target.con_id {
-        Some(con_id) => format!("[con_id={con_id}] focus"),
-        // Picking a display means going to it.
-        None => format!("focus output {}", target.id),
-    };
-    for res in conn.run_command(cmd)? {
-        res?;
-    }
-    Ok(())
 }

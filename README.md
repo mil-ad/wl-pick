@@ -1,7 +1,7 @@
 # wlgrid
 
 A window switcher for wlroots compositors: a grid overlay of **live** window
-previews that looks like a rofi theme, and focuses the window you pick.
+previews that looks like a rofi theme, and tells you which one you picked.
 
 It replaces a `wlthumbs | rofi` pipeline, and doubles as a screencast source
 picker for the desktop portal. The difference is that no thumbnails
@@ -39,7 +39,6 @@ wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
        [--live all|current|none] [--fps N] [--timeout SECS]
 ```
 
-- `--print` writes the selected sway `con_id` to stdout instead of focusing it
 - `--verbose` prints phase timings and how many windows were captured
 - `--hide-labels` draws an icon-only grid
 - `--font FAMILY` label font family (default `Berkeley Mono`)
@@ -53,14 +52,12 @@ wlgrid is a chooser: it reports what you picked and leaves acting on it to the
 caller. The pick goes to stdout, nothing does if you cancel, and the exit status
 is 0 for a pick and 1 for a cancel.
 
+wlgrid never acts on the choice — it has no idea what you want to do with it.
+Focusing on sway looks like this:
+
 ```sh
-# Simplest: let wlgrid do the focusing, for a bare keybinding.
-bindsym $mod+Tab exec wlgrid --focus
-
-# Windows only, in a script:
-swaymsg "[con_id=$(wlgrid --no-outputs | cut -f2)] focus"
-
-# Both windows and displays: the TYPE column says which command to use.
+#!/usr/bin/env bash
+# ~/.local/bin/winmenu, bound to $mod+Tab
 IFS=$'\t' read -r type id toplevel app title < <(wlgrid) || exit 0
 case $type in
     window) swaymsg "[con_id=$id] focus" ;;
@@ -68,8 +65,11 @@ case $type in
 esac
 ```
 
-`--focus` runs exactly those two commands for you. (Focusing a display only does
-something visible when you have more than one.)
+Windows only, as a one-liner:
+
+```sh
+swaymsg "[con_id=$(wlgrid --no-outputs | cut -f2)] focus"
+```
 
 Three formats, because the identifiers different consumers need differ:
 
@@ -145,8 +145,9 @@ A wlroots compositor advertising `ext-image-copy-capture-v1`,
 `ext-image-capture-source-v1` (with the foreign-toplevel source manager),
 `ext-foreign-toplevel-list-v1`, `wlr-layer-shell-unstable-v1` and
 `wp_viewporter` — sway 1.11+, and in principle Hyprland, labwc and jay, though
-only sway is tested. sway is also the source of truth for the window list and
-for focusing, over its IPC socket.
+only sway is tested. sway is also the source of truth for the window list, over
+its IPC socket, which is the one thing that would need replacing to run
+elsewhere (`ext-foreign-toplevel-list-v1` already reports app id and title).
 
 Known upstream issue: holding per-toplevel capture sessions open makes windows
 blurry on **fractionally scaled** outputs
