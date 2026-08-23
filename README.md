@@ -1,14 +1,14 @@
 # wlgrid
 
-A window switcher for wlroots compositors: a thumbnail grid overlay that looks
-like a rofi theme, and focuses the window you pick.
+A window switcher for wlroots compositors: a grid overlay of **live** window
+previews that looks like a rofi theme, and focuses the window you pick.
 
 It replaces a `wlthumbs | rofi` pipeline. The difference is that no thumbnails
 exist: each window is captured straight into a `wl_shm` buffer that is handed to
 its own `wl_subsurface`, and `wp_viewporter` tells the compositor which rectangle
 to scale it into. There is no image encoding, no scaler, and no full-resolution
-bitmap in this process — which is also why it holds ~9 MB of RSS and appears in
-about 60 ms.
+bitmap in this process — which is also why it appears in about 60 ms and holds
+~18 MB of RSS however many windows are open.
 
 ```
 sway-tree       0.6ms     window list + con_ids over sway IPC
@@ -28,14 +28,14 @@ nothing in wall clock.
 
 ## Status
 
-Working, and usable as a switcher today: a labelled static grid with keyboard
-navigation. Filtering and live previews are next — see the roadmap.
+Working: a labelled grid of live previews with keyboard navigation. Type-to-filter
+is the one thing the rofi version had that this doesn't — see the roadmap.
 
 ## Usage
 
 ```
 wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
-       [--timeout SECS]
+       [--live all|current|none] [--fps N] [--timeout SECS]
 ```
 
 - `--print` writes the selected sway `con_id` to stdout instead of focusing it
@@ -43,6 +43,8 @@ wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
 - `--hide-labels` draws an icon-only grid
 - `--font FAMILY` label font family (default `Berkeley Mono`)
 - `--font-size PX` label size in logical px
+- `--live all|current|none` which tiles keep updating (default `all`)
+- `--fps N` cap on updates per tile per second (default 12)
 - `--timeout SECS` exits after a deadline (an escape hatch: the overlay takes an
   exclusive keyboard grab)
 
@@ -63,6 +65,31 @@ bindsym $mod+Tab exec wlgrid
 Navigation reads raw evdev keycodes, so it is layout-independent — but it also
 means virtual-keyboard clients such as `wtype` (which invent their own keymap)
 cannot drive it. That goes away with xkb support, which filtering needs anyway.
+
+## Live previews
+
+Capture sessions stay open, so a tile can be refreshed. Three things keep that
+from being expensive:
+
+- **It is damage-driven.** After a session's first frame the compositor only
+  produces another once the window content changes, so a request left
+  outstanding on an idle window costs nothing. Measured over 4s with one
+  animating window out of ten: `52,52,1,1,1,1,1,1,13,1` frames — the static
+  windows delivered exactly their first frame and nothing more.
+- **Frame callbacks are the clock.** Re-captures are driven by the overlay's own
+  `wl_surface.frame` callbacks, so they stop when it isn't being presented, and
+  `--fps` throttles per tile on top of that (12 fps measured as 12.1).
+- **Two buffers per window, alternating.** A capture must not write into a buffer
+  the compositor is reading, so each window gets two and `wl_buffer.release`
+  decides which is free. Note that release is the entire contract: with `wl_shm`
+  the compositor copies the pixels out at commit and hands the buffer straight
+  back, so the slot on screen is usually free too — waiting for it to stop being
+  displayed instead deadlocks after two frames.
+
+The cost is memory and bandwidth: two full-resolution buffers per window (110 MB
+of shm for ten windows on this display, versus 55 MB with `--live none`) and a
+readback per refreshed frame. `--live current` refreshes only the selected tile,
+which is much cheaper and still reads as alive.
 
 ## Look
 
@@ -93,10 +120,10 @@ unaffected. It matters more once previews are live.
 
 ## Roadmap
 
-- **M3** type-to-filter with fzf-quality fuzzy matching (and xkb keyboard input)
-- **M4** live previews: keep the capture sessions open and re-capture on a rate
-  limit, `--live all|current|none`
-- **M5** dmabuf capture, so the pixels never leave the GPU at all
+- type-to-filter with fzf-quality fuzzy matching (and the xkb keyboard input it
+  needs, which would also let virtual-keyboard clients drive the overlay)
+- dmabuf capture, so the pixels never leave the GPU at all — and live previews
+  stop costing a readback per frame
 
 ## Building
 

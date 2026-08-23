@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer,
+    wl_buffer::{self, WlBuffer},
+    wl_callback,
     wl_compositor::WlCompositor,
     wl_keyboard::{self, WlKeyboard},
     wl_output,
@@ -75,24 +76,49 @@ const KEY_END: u32 = 107;
 const KEY_DOWN: u32 = 108;
 
 /// One window: its sway identity, its capture plumbing, and its subsurface.
+/// Which tiles keep updating after the first frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Live {
+    /// Every tile.
+    All,
+    /// Only the selected tile: much cheaper, and still reads as alive.
+    Current,
+    /// Nothing: one snapshot each, a picker rather than an expose.
+    None,
+}
+
+/// One capture buffer. `busy` means the compositor still holds it — either it is
+/// on screen or a capture is writing into it — so we must not scribble over it.
+struct Slot {
+    buffer: WlBuffer,
+    busy: bool,
+}
+
 #[allow(dead_code)] // `handle` is held to keep the toplevel alive
 struct Tile {
     win: sway::Win,
     handle: Option<ExtForeignToplevelHandleV1>,
 
     session: Option<ExtImageCopyCaptureSessionV1>,
+    /// A capture in flight, and which slot it is filling.
     frame: Option<ExtImageCopyCaptureFrameV1>,
-    buffer: Option<WlBuffer>,
+    filling: Option<usize>,
+    slots: Vec<Slot>,
+    /// The slot currently attached to the subsurface.
+    showing: Option<usize>,
     formats: Vec<wl_shm::Format>,
     format: Option<wl_shm::Format>,
     /// Buffer size the session requires: the window's full resolution.
     size: (u32, u32),
     transform: wl_output::Transform,
-    offset: usize,
     session_done: bool,
     ready: bool,
     failed: bool,
     settled: bool,
+    /// When the last capture was asked for, for rate limiting, and how many
+    /// frames this tile has produced.
+    asked: Option<Instant>,
+    frames: u32,
 
     surface: Option<WlSurface>,
     subsurface: Option<WlSubsurface>,
@@ -106,16 +132,19 @@ impl Tile {
             handle: None,
             session: None,
             frame: None,
-            buffer: None,
+            filling: None,
+            slots: Vec::new(),
+            showing: None,
             formats: Vec::new(),
             format: None,
             size: (0, 0),
             transform: wl_output::Transform::Normal,
-            offset: 0,
             session_done: false,
             ready: false,
             failed: false,
             settled: false,
+            asked: None,
+            frames: 0,
             surface: None,
             subsurface: None,
             viewport: None,
@@ -153,6 +182,8 @@ struct App {
 
     theme: Theme,
     layout: Layout,
+    live: Live,
+    fps: u32,
     scale: i32,
     sel: usize,
     shift: bool,
@@ -165,6 +196,12 @@ struct App {
 
     quit: bool,
     activate: Option<i64>,
+    /// Frame-callback ticks, for diagnosing the live clock.
+    ticks: u32,
+    releases: u32,
+    blocked_nofree: u32,
+    /// Bytes of shm handed to the compositor for capture buffers.
+    pool_bytes: usize,
 }
 
 impl App {
@@ -173,6 +210,8 @@ impl App {
         qh: &QueueHandle<Self>,
         wins: Vec<sway::Win>,
         theme: Theme,
+        live: Live,
+        fps: u32,
         scale: i32,
     ) -> Result<Self, Box<dyn Error>> {
         let layout = Layout::new(&theme, wins.len() as i32);
@@ -190,6 +229,8 @@ impl App {
             tiles: wins.into_iter().map(Tile::new).collect(),
             theme,
             layout,
+            live,
+            fps,
             scale,
             sel: 0,
             shift: false,
@@ -200,6 +241,10 @@ impl App {
             configured: false,
             quit: false,
             activate: None,
+            ticks: 0,
+            releases: 0,
+            blocked_nofree: 0,
+            pool_bytes: 0,
         };
         let _: ExtForeignToplevelListV1 = globals.bind(qh, 1..=1, ())?;
         let _: WlSeat = globals.bind(qh, 1..=7, ())?;
@@ -234,13 +279,21 @@ impl App {
         }
     }
 
-    /// Allocate one pool for every capture buffer and put all the frames in
+    /// Allocate the capture buffers in one pool and put every first frame in
     /// flight at once: the compositor is bandwidth-bound reading pixels back, so
     /// serialising the captures only adds latency.
+    ///
+    /// Live mode gets two buffers per window. A capture may not write into the
+    /// buffer the compositor is currently displaying, so the two alternate:
+    /// fill B while A is on screen, swap, and wait for A's release before
+    /// touching it again.
     fn start_captures(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
         const PAGE: usize = 4096;
+        let slots = if self.live == Live::None { 1 } else { 2 };
         let mut total = 0usize;
+        let mut offsets: Vec<Vec<usize>> = Vec::with_capacity(self.tiles.len());
         for tile in &mut self.tiles {
+            offsets.push(Vec::new());
             if tile.session.is_none() {
                 continue;
             }
@@ -261,42 +314,129 @@ impl App {
                 tile.settled = true;
                 continue;
             }
-            tile.offset = total;
-            total += tile.bytes().div_ceil(PAGE) * PAGE;
+            let last = offsets.last_mut().expect("just pushed");
+            for _ in 0..slots {
+                last.push(total);
+                total += tile.bytes().div_ceil(PAGE) * PAGE;
+            }
         }
         if total == 0 {
             return Ok(());
         }
 
+        self.pool_bytes = total;
         // Note: no mmap. The compositor writes these pages and samples them
         // again for display; mapping them here would only cost us the faults.
         let file = shm::memfd("wlgrid-capture", total)?;
         let pool = self.shm.create_pool(file.as_fd(), total as i32, qh, ());
-        for i in 0..self.tiles.len() {
-            let (w, h, format, offset) = {
+        for (i, slot_offsets) in offsets.iter().enumerate() {
+            let (w, h, format) = {
                 let t = &self.tiles[i];
                 if t.settled || t.session.is_none() || t.format.is_none() {
                     continue;
                 }
-                (
-                    t.size.0 as i32,
-                    t.size.1 as i32,
-                    t.format.unwrap(),
-                    t.offset as i32,
-                )
+                (t.size.0 as i32, t.size.1 as i32, t.format.unwrap())
             };
-            let buffer = pool.create_buffer(offset, w, h, w * 4, format, qh, ());
-            let session = self.tiles[i].session.clone().unwrap();
-            let frame = session.create_frame(qh, i);
-            frame.attach_buffer(&buffer);
-            frame.damage_buffer(0, 0, w, h);
-            frame.capture();
-            let t = &mut self.tiles[i];
-            t.buffer = Some(buffer);
-            t.frame = Some(frame);
+            for &offset in slot_offsets {
+                let slot = self.tiles[i].slots.len();
+                let buffer = pool.create_buffer(offset as i32, w, h, w * 4, format, qh, (i, slot));
+                self.tiles[i].slots.push(Slot {
+                    buffer,
+                    busy: false,
+                });
+            }
+            self.request_capture(i, qh);
         }
         pool.destroy(); // the buffers keep the mapping alive
         Ok(())
+    }
+
+    /// Ask the compositor for one frame of window `i`, into a free slot.
+    ///
+    /// After a session's first frame the compositor only answers once the window
+    /// content changes, so a request left outstanding on an idle window costs
+    /// nothing: this is damage-driven, and the rate limit only bites on windows
+    /// that really are animating.
+    fn request_capture(&mut self, i: usize, qh: &QueueHandle<Self>) -> bool {
+        let t = &mut self.tiles[i];
+        if t.frame.is_some() || t.session.is_none() {
+            return false; // already waiting on one
+        }
+        let Some(slot) = t.slots.iter().position(|s| !s.busy) else {
+            self.blocked_nofree += 1;
+            return false; // both buffers still held by the compositor
+        };
+        let (w, h) = (t.size.0 as i32, t.size.1 as i32);
+        let frame = t
+            .session
+            .as_ref()
+            .expect("checked above")
+            .create_frame(qh, i);
+        frame.attach_buffer(&t.slots[slot].buffer);
+        frame.damage_buffer(0, 0, w, h);
+        frame.capture();
+        t.frame = Some(frame);
+        t.filling = Some(slot);
+        t.asked = Some(Instant::now());
+        true
+    }
+
+    /// A capture landed: show it, and let go of the slot it replaced.
+    fn frame_ready(&mut self, i: usize) {
+        let t = &mut self.tiles[i];
+        let Some(slot) = t.filling.take() else { return };
+        t.frames += 1;
+        t.ready = true;
+        t.settled = true;
+        t.slots[slot].busy = true; // the compositor reads it until it releases it
+        let previous = t.showing.replace(slot);
+        // Before the overlay is mapped there is nothing to attach to yet;
+        // place_tiles picks up `showing` instead.
+        if let Some(surface) = t.surface.clone() {
+            let (w, h) = (t.size.0 as i32, t.size.1 as i32);
+            surface.attach(Some(&t.slots[slot].buffer), 0, 0);
+            surface.damage_buffer(0, 0, w, h);
+            surface.commit();
+        } else if let Some(prev) = previous {
+            // Not on screen yet, so the old slot was never actually read.
+            t.slots[prev].busy = false;
+        }
+    }
+
+    /// Ask for the next frame callback. A commit is needed for the compositor to
+    /// schedule one, and an empty commit is enough.
+    fn arm_frame_callback(&mut self, qh: &QueueHandle<Self>) {
+        if self.live == Live::None {
+            return;
+        }
+        if let Some(surface) = self.surface.clone() {
+            surface.frame(qh, ());
+            surface.commit();
+        }
+    }
+
+    /// Re-capture whatever is due. Driven by frame callbacks, so it stops when
+    /// the overlay is not being presented.
+    fn tick(&mut self, qh: &QueueHandle<Self>) {
+        self.ticks += 1;
+        if self.live == Live::None {
+            return;
+        }
+        let interval = Duration::from_secs_f64(1.0 / self.fps.max(1) as f64);
+        let now = Instant::now();
+        for i in 0..self.tiles.len() {
+            if self.live == Live::Current && i != self.sel {
+                continue;
+            }
+            let t = &self.tiles[i];
+            if t.slots.is_empty() || t.frame.is_some() {
+                continue;
+            }
+            if t.asked.is_some_and(|a| now.duration_since(a) < interval) {
+                continue;
+            }
+            self.request_capture(i, qh);
+        }
     }
 
     fn captures_settled(&self) -> bool {
@@ -369,7 +509,8 @@ impl App {
             // so it passes straight through and the compositor un-rotates it.
             surface.set_buffer_transform(self.tiles[i].transform);
             viewport.set_destination(dst.w, dst.h);
-            surface.attach(self.tiles[i].buffer.as_ref(), 0, 0);
+            let slot = self.tiles[i].showing.expect("a ready tile has a slot");
+            surface.attach(Some(&self.tiles[i].slots[slot].buffer), 0, 0);
             surface.damage_buffer(0, 0, bw as i32, bh as i32);
             surface.commit();
             let t = &mut self.tiles[i];
@@ -521,6 +662,8 @@ struct Args {
     hide_labels: bool,
     font: Option<String>,
     font_size: Option<f32>,
+    live: Live,
+    fps: u32,
     timeout: Option<Duration>,
 }
 
@@ -531,6 +674,8 @@ fn parse_args() -> Result<Args, String> {
         hide_labels: false,
         font: None,
         font_size: None,
+        live: Live::All,
+        fps: 12,
         timeout: None,
     };
     let mut it = std::env::args().skip(1);
@@ -539,6 +684,18 @@ fn parse_args() -> Result<Args, String> {
             "--print" => args.print = true,
             "-v" | "--verbose" => args.verbose = true,
             "--hide-labels" => args.hide_labels = true,
+            "--live" => {
+                args.live = match it.next().ok_or("--live needs all|current|none")?.as_str() {
+                    "all" => Live::All,
+                    "current" => Live::Current,
+                    "none" => Live::None,
+                    other => return Err(format!("bad --live: {other}")),
+                }
+            }
+            "--fps" => {
+                let v = it.next().ok_or("--fps needs a number")?;
+                args.fps = v.parse().map_err(|_| format!("bad --fps: {v}"))?;
+            }
             "--font" => args.font = Some(it.next().ok_or("--font needs a family name")?),
             "--font-size" => {
                 let v = it.next().ok_or("--font-size needs px")?;
@@ -552,7 +709,8 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "usage: wlgrid [--print] [--verbose] [--hide-labels] \
-                     [--font FAMILY] [--font-size PX] [--timeout SECS]"
+                     [--font FAMILY] [--font-size PX] \
+                     [--live all|current|none] [--fps N] [--timeout SECS]"
                 );
                 std::process::exit(0);
             }
@@ -584,6 +742,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         });
     }
 
+    let start = Instant::now();
     let mut phases = Phases::new(args.verbose);
     let mut sway_conn = swayipc::Connection::new()?;
     let wins = sway::windows(&mut sway_conn)?;
@@ -632,7 +791,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
     let qh = queue.handle();
-    let mut app = App::new(&globals, &qh, wins, theme, scale)?;
+    let mut app = App::new(&globals, &qh, wins, theme, args.live, args.fps, scale)?;
 
     // Two roundtrips: one for the toplevel list, one for each handle's state.
     queue.roundtrip(&mut app)?;
@@ -665,23 +824,43 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         eprintln!(
             "wlgrid: {} window(s), {matched} matched, {ready} captured; \
-             grid {}x{}, surface {}x{} logical at scale {}",
+             grid {}x{}, surface {}x{} logical at scale {}, {} MB of capture buffers",
             app.tiles.len(),
             app.layout.cols,
             app.layout.rows,
             app.layout.width,
             app.layout.height,
             app.scale,
+            app.pool_bytes >> 20,
         );
     }
     app.show(&qh)?;
     pump(&mut queue, &mut app, |a| a.configured)?;
     app.paint();
     app.place_tiles(&qh);
+    app.arm_frame_callback(&qh);
     conn.flush()?;
     phases.mark("mapped");
 
     pump(&mut queue, &mut app, |a| a.quit)?;
+
+    if args.verbose {
+        let frames: u32 = app.tiles.iter().map(|t| t.frames).sum();
+        let live_for = start.elapsed().as_secs_f64();
+        eprintln!(
+            "wlgrid: {frames} frame(s) over {live_for:.1}s = {:.1}/s, {} tick(s), \
+             {} release(s), {} blocked; per tile: {}",
+            frames as f64 / live_for,
+            app.ticks,
+            app.releases,
+            app.blocked_nofree,
+            app.tiles
+                .iter()
+                .map(|t| t.frames.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
 
     if let Some(con_id) = app.activate {
         if args.print {
@@ -789,21 +968,27 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 transform: WEnum::Value(t),
             } => tile.transform = t,
             ext_image_copy_capture_frame_v1::Event::Ready => {
-                tile.ready = true;
-                tile.settled = true;
                 // The protocol wants the frame destroyed once ready; the buffer
                 // stays ours to display.
                 if let Some(frame) = tile.frame.take() {
                     frame.destroy();
                 }
+                app.frame_ready(i);
             }
             ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
-                eprintln!(
-                    "wlgrid: capture failed for {:?} ({reason:?})",
-                    tile.win.title
-                );
-                tile.failed = true;
+                // Live mode just retries on the next tick; only a failure with no
+                // frame yet leaves the tile without a thumbnail.
+                if tile.frames == 0 {
+                    eprintln!(
+                        "wlgrid: capture failed for {:?} ({reason:?})",
+                        tile.win.title
+                    );
+                    tile.failed = true;
+                }
                 tile.settled = true;
+                if let Some(slot) = tile.filling.take() {
+                    tile.slots[slot].busy = false;
+                }
                 if let Some(frame) = tile.frame.take() {
                     frame.destroy();
                 }
@@ -888,4 +1073,49 @@ delegate_noop!(App: ExtImageCopyCaptureManagerV1);
 delegate_noop!(App: ExtForeignToplevelImageCaptureSourceManagerV1);
 delegate_noop!(App: ExtImageCaptureSourceV1);
 delegate_noop!(App: ignore WlSurface);
+
+// The chrome's own buffers: two slots alternating on keypresses, so their
+// release timing does not matter.
 delegate_noop!(App: ignore WlBuffer);
+
+/// A released capture buffer is a slot we may capture into again.
+///
+/// Release is the whole contract: with wl_shm the compositor copies the pixels
+/// out at commit and hands the buffer straight back, so the slot currently on
+/// screen is usually free too. (Waiting for it to stop being the displayed slot
+/// instead would deadlock — that release never comes twice.)
+impl Dispatch<WlBuffer, (usize, usize)> for App {
+    fn event(
+        app: &mut Self,
+        _: &WlBuffer,
+        event: wl_buffer::Event,
+        &(tile, slot): &(usize, usize),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            app.releases += 1;
+            if let Some(t) = app.tiles.get_mut(tile) {
+                t.slots[slot].busy = false;
+            }
+        }
+    }
+}
+
+/// Frame callbacks are the clock for live updates: they arrive as the compositor
+/// presents the overlay, so re-captures stop when it is not being shown.
+impl Dispatch<wl_callback::WlCallback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            app.tick(qh);
+            app.arm_frame_callback(qh);
+        }
+    }
+}
