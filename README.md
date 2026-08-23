@@ -54,12 +54,22 @@ caller. The pick goes to stdout, nothing does if you cancel, and the exit status
 is 0 for a pick and 1 for a cancel.
 
 ```sh
-# sway scripting: act on the con_id
-swaymsg "[con_id=$(wlgrid | cut -f2)] focus"
-
-# or let wlgrid do it, for a bare keybinding
+# Simplest: let wlgrid do the focusing, for a bare keybinding.
 bindsym $mod+Tab exec wlgrid --focus
+
+# Windows only, in a script:
+swaymsg "[con_id=$(wlgrid --no-outputs | cut -f2)] focus"
+
+# Both windows and displays: the TYPE column says which command to use.
+IFS=$'\t' read -r type id toplevel app title < <(wlgrid) || exit 0
+case $type in
+    window) swaymsg "[con_id=$id] focus" ;;
+    output) swaymsg "focus output $id" ;;
+esac
 ```
+
+`--focus` runs exactly those two commands for you. (Focusing a display only does
+something visible when you have more than one.)
 
 Three formats, because the identifiers different consumers need differ:
 

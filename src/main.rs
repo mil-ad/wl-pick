@@ -217,6 +217,8 @@ struct App {
     configured: bool,
 
     quit: bool,
+    /// Why the overlay closed, for --verbose.
+    quit_why: &'static str,
     activate: Option<Target>,
     /// Frame-callback ticks, for diagnosing the live clock.
     ticks: u32,
@@ -265,6 +267,7 @@ impl App {
             chrome_buffers: Vec::new(),
             configured: false,
             quit: false,
+            quit_why: "",
             activate: None,
             ticks: 0,
             releases: 0,
@@ -645,9 +648,13 @@ impl App {
     fn key(&mut self, code: u32) {
         match code {
             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => self.shift = true,
-            KEY_ESC | KEY_Q => self.quit = true,
+            KEY_ESC | KEY_Q => {
+                self.quit_why = "cancelled";
+                self.quit = true;
+            }
             KEY_ENTER | KEY_KPENTER => {
                 self.activate = self.tiles.get(self.sel).map(|t| t.target.clone());
+                self.quit_why = "picked";
                 self.quit = true;
             }
             KEY_TAB if self.shift => self.move_sel(-1),
@@ -976,6 +983,9 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     // wlgrid is a chooser: it reports the pick and leaves acting on it to the
     // caller (--focus is a convenience for a bare keybinding).
+    if args.verbose {
+        eprintln!("wlgrid: {}", app.quit_why);
+    }
     let Some(target) = app.activate else {
         return Ok(ExitCode::FAILURE); // cancelled: nothing on stdout
     };
@@ -1138,7 +1148,10 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
                 layer.ack_configure(serial);
                 app.configured = true;
             }
-            zwlr_layer_surface_v1::Event::Closed => app.quit = true,
+            zwlr_layer_surface_v1::Event::Closed => {
+                app.quit_why = "the compositor closed the overlay";
+                app.quit = true;
+            }
             _ => {}
         }
     }
