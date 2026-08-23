@@ -25,8 +25,10 @@ usage: wl-pick [options]
   -v, --verbose             phase timings, tile list and capture stats
   -h, --help                this
 
-keys: arrows, hjkl or Tab/Shift+Tab move; Home/End jump; Enter picks;
-      Escape or q cancels
+keys:  arrows, hjkl or Tab/Shift+Tab move; Home/End jump; Enter picks;
+       Escape or q cancels
+mouse: click a tile to pick it, scroll to move. Hovering does not move the
+       selection, and a click outside a tile does nothing.
 
 The pick goes to stdout and nothing does if you cancel, so exit status is
 0 for a pick and 1 for a cancel. Acting on it is the caller's job.

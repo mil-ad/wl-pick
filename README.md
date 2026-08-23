@@ -95,8 +95,16 @@ chooser_cmd=wl-pick --format portal
 | `→` `←` / `l` `h` / `Tab` `Shift+Tab` | next / previous tile |
 | `↓` `↑` / `j` `k` | move a row |
 | `Home` `End` | first / last |
-| `Enter` | pick |
+| `Enter` | pick the selection |
 | `Escape` / `q` | cancel |
+| click | pick that tile |
+| scroll | next / previous tile |
+
+Hovering deliberately does not move the selection — the keyboard keeps it, and a
+click acts on whatever is under the cursor. Clicking the margin, a gap, or an
+empty cell of a ragged last row does nothing. Tiles are subsurfaces, so a click
+on a thumbnail identifies its tile by surface; only clicks on the chrome around
+them need hit-testing.
 
 Navigation reads raw evdev keycodes, so it is layout-independent — but it also
 means virtual-keyboard clients such as `wtype` (which invent their own keymap)
@@ -181,5 +189,6 @@ shm.rs      memfd allocation and the ARGB painter
 
 ```
 cargo build --release
-cargo test          # grid geometry, ellipsising, output formats, glyph output
+cargo test          # grid geometry and hit-testing, ellipsising, output
+                    # formats, glyph output
 ```

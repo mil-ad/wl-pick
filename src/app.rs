@@ -33,12 +33,17 @@ use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
 };
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+};
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
 use crate::capture::{Live, Tile};
+use crate::overlay;
 use crate::shm;
 use crate::target::Target;
 use crate::text;
@@ -79,6 +84,16 @@ pub struct App {
     pub(crate) scale: i32,
     pub(crate) sel: usize,
     pub(crate) shift: bool,
+
+    /// Where the pointer is, and which tile it pressed. Hovering deliberately
+    /// does not move the keyboard selection; a click acts on what is under the
+    /// cursor instead.
+    pub(crate) hover: Option<overlay::Hover>,
+    pub(crate) pressed: Option<usize>,
+    /// Set the cursor shape without shipping a cursor theme. Optional: without
+    /// it the pointer keeps whatever shape it had over the window below.
+    pub(crate) cursor_shape: Option<WpCursorShapeManagerV1>,
+    pub(crate) cursor_device: Option<WpCursorShapeDeviceV1>,
 
     pub(crate) labels: Option<text::Labels>,
     pub(crate) surface: Option<WlSurface>,
@@ -161,6 +176,10 @@ impl App {
             scale,
             sel: 0,
             shift: false,
+            hover: None,
+            pressed: None,
+            cursor_shape: globals.bind(qh, 1..=2, ()).ok(),
+            cursor_device: None,
             labels: None,
             surface: None,
             chrome: None,
@@ -323,4 +342,6 @@ delegate_noop!(App: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(App: ignore WlSurface);
 // The chrome's own buffers: two slots alternating on keypresses, so their
 // release timing does not matter.
+delegate_noop!(App: WpCursorShapeManagerV1);
+delegate_noop!(App: WpCursorShapeDeviceV1);
 delegate_noop!(App: ignore WlBuffer);

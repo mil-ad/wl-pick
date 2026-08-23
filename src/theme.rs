@@ -67,6 +67,8 @@ impl Default for Theme {
 pub struct Layout {
     pub cols: i32,
     pub rows: i32,
+    /// How many tiles there are, which the last row may not fill.
+    n: i32,
     pub width: i32,
     pub height: i32,
     elem_w: i32,
@@ -96,6 +98,7 @@ impl Layout {
         Self {
             cols,
             rows,
+            n,
             width: cols * elem_w + (cols - 1) * t.gap + 2 * t.margin,
             height: rows * elem_h + (rows - 1) * t.gap + 2 * t.margin,
             elem_w,
@@ -130,6 +133,28 @@ impl Layout {
             w: e.w - 2 * self.pad,
             h: self.tile_h,
         }
+    }
+
+    /// The tile at a point in surface-local coordinates, if any. Points in the
+    /// gaps between elements and in the window margin belong to nothing, and so
+    /// do the empty cells of a ragged last row.
+    pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
+        let col = self.axis(x, self.margin, self.elem_w, self.cols)?;
+        let row = self.axis(y, self.margin, self.elem_h, self.rows)?;
+        let i = row * self.cols + col;
+        (i < self.n).then_some(i as usize)
+    }
+
+    /// Which cell along one axis a coordinate falls in, or None if it landed in
+    /// the margin or a gap.
+    fn axis(&self, v: i32, margin: i32, elem: i32, count: i32) -> Option<i32> {
+        let pitch = elem + self.gap;
+        let offset = v - margin;
+        if offset < 0 {
+            return None;
+        }
+        let cell = offset / pitch;
+        (cell < count && offset % pitch < elem).then_some(cell)
     }
 
     /// The single line of text under the thumbnail, if labels are drawn.
@@ -251,6 +276,40 @@ mod tests {
             // Everything, padding included, stays inside the element.
             assert!(label.y + label.h + t.pad <= elem.y + elem.h);
         }
+    }
+
+    #[test]
+    fn hit_testing_is_the_inverse_of_the_layout() {
+        let t = Theme::default();
+        // 7 tiles over 3 columns: the last row holds one, so two cells are empty.
+        let l = Layout::new(&t, 7);
+        for i in 0..7 {
+            let e = l.elem(i);
+            for (x, y, what) in [
+                (e.x, e.y, "top left"),
+                (e.x + e.w / 2, e.y + e.h / 2, "centre"),
+                (e.x + e.w - 1, e.y + e.h - 1, "bottom right"),
+            ] {
+                assert_eq!(l.hit(x, y), Some(i as usize), "{what} of element {i}");
+            }
+        }
+        // The window margin, the gap between elements, and the empty cells of
+        // the last row all belong to no tile.
+        assert_eq!(l.hit(0, 0), None, "margin");
+        let first = l.elem(0);
+        assert_eq!(
+            l.hit(first.x + first.w + 1, first.y),
+            None,
+            "gap between columns"
+        );
+        assert_eq!(
+            l.hit(first.x, first.y + first.h + 1),
+            None,
+            "gap between rows"
+        );
+        let empty = l.elem(8); // row 2, column 2: past the seventh tile
+        assert_eq!(l.hit(empty.x + 4, empty.y + 4), None, "empty cell");
+        assert_eq!(l.hit(-5, -5), None, "outside");
     }
 
     #[test]

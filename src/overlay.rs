@@ -10,14 +10,18 @@ use std::os::fd::AsFd;
 
 use wayland_client::protocol::{
     wl_keyboard::{self, WlKeyboard},
+    wl_pointer::{self, WlPointer},
     wl_seat::{self, WlSeat},
     wl_shm,
+    wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::Layer,
     zwlr_layer_surface_v1::{self, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 
 use crate::app::{App, Ending};
 use crate::shm;
@@ -43,6 +47,18 @@ const KEY_LEFT: u32 = 105;
 const KEY_RIGHT: u32 = 106;
 const KEY_END: u32 = 107;
 const KEY_DOWN: u32 = 108;
+
+/// evdev button code, as wl_pointer reports it.
+const BTN_LEFT: u32 = 0x110;
+
+/// Where the pointer is: the surface it entered, and the position within it.
+/// Tiles are subsurfaces, so the surface alone usually names a tile; the
+/// position is only needed over the chrome around them.
+pub struct Hover {
+    pub surface: WlSurface,
+    pub x: f64,
+    pub y: f64,
+}
 
 impl App {
     /// Map the overlay: a layer surface sized to hug the grid, plus the shm the
@@ -185,6 +201,36 @@ impl App {
         }
     }
 
+    /// The tile under the pointer, if it is over one. A tile's own subsurface
+    /// answers directly; over the parent surface — padding, labels, gaps — the
+    /// layout is asked instead.
+    fn tile_at_pointer(&self) -> Option<usize> {
+        let hover = self.hover.as_ref()?;
+        let on_tile = self
+            .tiles
+            .iter()
+            .position(|t| t.surface.as_ref() == Some(&hover.surface));
+        on_tile.or_else(|| {
+            (Some(&hover.surface) == self.surface.as_ref())
+                .then(|| self.layout.hit(hover.x as i32, hover.y as i32))
+                .flatten()
+        })
+    }
+
+    /// Press and release on the same tile picks it. Anywhere else — the margin,
+    /// a gap, an empty cell of the last row — does nothing at all.
+    fn click(&mut self, pressed: bool) {
+        if pressed {
+            self.pressed = self.tile_at_pointer();
+            return;
+        }
+        let released = self.tile_at_pointer();
+        if let Some(i) = self.pressed.take().filter(|i| Some(*i) == released) {
+            self.picked = self.tiles.get(i).map(|t| t.target.clone());
+            self.ending = Ending::Picked;
+        }
+    }
+
     fn key(&mut self, code: u32) {
         match code {
             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => self.shift = true,
@@ -235,19 +281,28 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
 
 impl Dispatch<WlSeat, ()> for App {
     fn event(
-        _: &mut Self,
+        app: &mut Self,
         seat: &WlSeat,
         event: wl_seat::Event,
         _: &(),
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_seat::Event::Capabilities {
+        let wl_seat::Event::Capabilities {
             capabilities: WEnum::Value(caps),
         } = event
-            && caps.contains(wl_seat::Capability::Keyboard)
-        {
+        else {
+            return;
+        };
+        if caps.contains(wl_seat::Capability::Keyboard) {
             seat.get_keyboard(qh, ());
+        }
+        if caps.contains(wl_seat::Capability::Pointer) {
+            let pointer = seat.get_pointer(qh, ());
+            app.cursor_device = app
+                .cursor_shape
+                .as_ref()
+                .map(|mgr| mgr.get_pointer(&pointer, qh, ()));
         }
     }
 }
@@ -271,6 +326,60 @@ impl Dispatch<WlKeyboard, ()> for App {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// Hovering does not move the selection — that belongs to the keyboard — so the
+/// pointer only tracks where it is and what it clicked. Scrolling is a
+/// deliberate gesture, so that does move the selection.
+impl Dispatch<WlPointer, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                serial,
+                surface,
+                surface_x,
+                surface_y,
+            } => {
+                // A client owns the cursor over its own surfaces; without this
+                // the pointer keeps whatever shape the window below gave it.
+                if let Some(device) = &app.cursor_device {
+                    device.set_shape(serial, Shape::Default);
+                }
+                app.hover = Some(Hover {
+                    surface,
+                    x: surface_x,
+                    y: surface_y,
+                });
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if let Some(hover) = app.hover.as_mut() {
+                    (hover.x, hover.y) = (surface_x, surface_y);
+                }
+            }
+            wl_pointer::Event::Leave { .. } => {
+                app.hover = None;
+                app.pressed = None;
+            }
+            wl_pointer::Event::Button {
+                button: BTN_LEFT,
+                state: WEnum::Value(state),
+                ..
+            } => app.click(state == wl_pointer::ButtonState::Pressed),
+            wl_pointer::Event::Axis { value, .. } => app.move_sel(if value > 0.0 { 1 } else { -1 }),
+            _ => {}
         }
     }
 }
