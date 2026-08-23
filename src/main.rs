@@ -10,6 +10,7 @@
 
 mod shm;
 mod sway;
+mod text;
 mod theme;
 
 use std::error::Error;
@@ -156,6 +157,7 @@ struct App {
     sel: usize,
     shift: bool,
 
+    labels: Option<text::Labels>,
     surface: Option<WlSurface>,
     chrome: Option<shm::Chrome>,
     chrome_buffers: Vec<WlBuffer>,
@@ -191,6 +193,7 @@ impl App {
             scale,
             sel: 0,
             shift: false,
+            labels: None,
             surface: None,
             chrome: None,
             chrome_buffers: Vec::new(),
@@ -379,29 +382,40 @@ impl App {
         parent.commit();
     }
 
-    /// Repaint background, selection highlight and border.
+    /// Repaint background, selection highlight, labels and border.
     fn paint(&mut self) {
-        let (theme, scale, sel) = (&self.theme, self.scale, self.sel);
-        let elem = self.layout.elem(sel as i32);
+        let (scale, sel) = (self.scale, self.sel);
+        let elem = scaled(self.layout.elem(sel as i32), scale);
+        // Gather geometry before borrowing the chrome and the labels together.
+        let label_boxes: Vec<(usize, Rect)> = (0..self.tiles.len())
+            .filter_map(|i| self.layout.label(i as i32).map(|r| (i, scaled(r, scale))))
+            .collect();
+        let t = &self.theme;
+        let (bg, sel_bg, fg, sel_fg, border, border_px) = (
+            t.bg,
+            t.sel_bg,
+            t.fg,
+            t.sel_fg,
+            t.border,
+            t.border_px * scale,
+        );
+        let labels = self.labels.as_mut();
         let Some(chrome) = self.chrome.as_mut() else {
             return;
         };
         let slot = chrome.next_slot();
         let (cw, ch) = (chrome.w, chrome.h);
         let mut p = chrome.painter();
-        p.fill(theme.bg);
+        p.fill(bg);
         // The selection fills the whole element box, padding included — the same
         // thing rofi's element background does.
-        p.rect(
-            Rect {
-                x: elem.x * scale,
-                y: elem.y * scale,
-                w: elem.w * scale,
-                h: elem.h * scale,
-            },
-            theme.sel_bg,
-        );
-        p.frame(theme.border_px * scale, theme.border);
+        p.rect(elem, sel_bg);
+        if let Some(labels) = labels {
+            for (i, at) in label_boxes {
+                labels.draw(&mut p, i, at, if i == sel { sel_fg } else { fg });
+            }
+        }
+        p.frame(border_px, border);
 
         let surface = self.surface.clone().expect("show() runs first");
         surface.attach(self.chrome_buffers.get(slot), 0, 0);
@@ -480,6 +494,16 @@ impl Phases {
     }
 }
 
+/// Logical rect -> physical rect, for painting into the scaled chrome buffer.
+fn scaled(r: Rect, scale: i32) -> Rect {
+    Rect {
+        x: r.x * scale,
+        y: r.y * scale,
+        w: r.w * scale,
+        h: r.h * scale,
+    }
+}
+
 fn pump(
     queue: &mut EventQueue<App>,
     app: &mut App,
@@ -494,6 +518,9 @@ fn pump(
 struct Args {
     print: bool,
     verbose: bool,
+    hide_labels: bool,
+    font: Option<String>,
+    font_size: Option<f32>,
     timeout: Option<Duration>,
 }
 
@@ -501,6 +528,9 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         print: false,
         verbose: false,
+        hide_labels: false,
+        font: None,
+        font_size: None,
         timeout: None,
     };
     let mut it = std::env::args().skip(1);
@@ -508,13 +538,22 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--print" => args.print = true,
             "-v" | "--verbose" => args.verbose = true,
+            "--hide-labels" => args.hide_labels = true,
+            "--font" => args.font = Some(it.next().ok_or("--font needs a family name")?),
+            "--font-size" => {
+                let v = it.next().ok_or("--font-size needs px")?;
+                args.font_size = Some(v.parse().map_err(|_| format!("bad --font-size: {v}"))?);
+            }
             "--timeout" => {
                 let v = it.next().ok_or("--timeout needs seconds")?;
                 let secs: f64 = v.parse().map_err(|_| format!("bad --timeout: {v}"))?;
                 args.timeout = Some(Duration::from_secs_f64(secs));
             }
             "-h" | "--help" => {
-                println!("usage: wlgrid [--print] [--verbose] [--timeout SECS]");
+                println!(
+                    "usage: wlgrid [--print] [--verbose] [--hide-labels] \
+                     [--font FAMILY] [--font-size PX] [--timeout SECS]"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -562,10 +601,38 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     phases.mark("sway-tree");
 
+    let base = Theme::default();
+    let font_px = args.font_size.unwrap_or(base.font_px);
+    let theme = Theme {
+        labels: !args.hide_labels,
+        font: args.font.unwrap_or_else(|| base.font.clone()),
+        line_h: match args.font_size {
+            Some(_) => (font_px * 1.3).ceil() as i32,
+            None => base.line_h,
+        },
+        font_px,
+        ..base
+    };
+
+    // Start shaping labels now: it costs ~55ms of font loading and glyph
+    // rasterising, and the captures below are ~55ms of waiting on the
+    // compositor, so the two overlap almost exactly.
+    let label_job = theme.labels.then(|| {
+        let layout = Layout::new(&theme, wins.len() as i32);
+        let box_w = layout.label(0).map(|r| r.w).unwrap_or(theme.tile_w);
+        text::spawn(
+            wins.iter().map(sway::Win::label).collect(),
+            theme.font.clone(),
+            theme.font_px * scale as f32,
+            (theme.line_h * scale) as f32,
+            (box_w * scale) as f32,
+        )
+    });
+
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
     let qh = queue.handle();
-    let mut app = App::new(&globals, &qh, wins, Theme::default(), scale)?;
+    let mut app = App::new(&globals, &qh, wins, theme, scale)?;
 
     // Two roundtrips: one for the toplevel list, one for each handle's state.
     queue.roundtrip(&mut app)?;
@@ -580,9 +647,22 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     pump(&mut queue, &mut app, |a| a.captures_settled())?;
     phases.mark("capture");
 
+    if let Some(job) = label_job {
+        app.labels = job.join().map_err(|_| "label thread panicked")?.into();
+    }
+    phases.mark("labels");
+
     if args.verbose {
         let ready = app.tiles.iter().filter(|t| t.ready).count();
         let matched = app.tiles.iter().filter(|t| t.handle.is_some()).count();
+        for (i, t) in app.tiles.iter().enumerate() {
+            eprintln!(
+                "  [{i}] con_id={} {}{}",
+                t.win.con_id,
+                t.win.label(),
+                if t.ready { "" } else { "  (no thumbnail)" }
+            );
+        }
         eprintln!(
             "wlgrid: {} window(s), {matched} matched, {ready} captured; \
              grid {}x{}, surface {}x{} logical at scale {}",

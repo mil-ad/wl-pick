@@ -27,6 +27,16 @@ pub struct Theme {
     /// Margin between the grid and the window edge.
     pub margin: i32,
     pub max_cols: i32,
+    /// Gap between a thumbnail and its label (rasi `element { spacing }`).
+    pub spacing: i32,
+    /// Label font: a family name resolved against system fonts, with whatever
+    /// cosmic-text falls back to if it is missing. Size and line height are
+    /// logical px — rofi's "Berkeley Mono 12" at pango size="small".
+    pub font: String,
+    pub font_px: f32,
+    pub line_h: i32,
+    /// Draw labels at all (rofigrid's --hide-labels drew an icon-only grid).
+    pub labels: bool,
 }
 
 impl Default for Theme {
@@ -44,6 +54,11 @@ impl Default for Theme {
             gap: 15,
             margin: 12,
             max_cols: 4,
+            spacing: 10,
+            font: "Berkeley Mono".to_string(),
+            font_px: 13.3,
+            line_h: 17,
+            labels: true,
         }
     }
 }
@@ -59,6 +74,10 @@ pub struct Layout {
     margin: i32,
     gap: i32,
     pad: i32,
+    tile_h: i32,
+    spacing: i32,
+    line_h: i32,
+    labels: bool,
 }
 
 impl Layout {
@@ -71,7 +90,9 @@ impl Layout {
         }
         cols = cols.clamp(1, t.max_cols);
         let rows = (n + cols - 1) / cols;
-        let (elem_w, elem_h) = (t.tile_w + 2 * t.pad, t.tile_h + 2 * t.pad);
+        // An element is the thumbnail, optionally a label under it, and padding.
+        let label_row = if t.labels { t.spacing + t.line_h } else { 0 };
+        let (elem_w, elem_h) = (t.tile_w + 2 * t.pad, t.tile_h + label_row + 2 * t.pad);
         Self {
             cols,
             rows,
@@ -82,6 +103,10 @@ impl Layout {
             margin: t.margin,
             gap: t.gap,
             pad: t.pad,
+            tile_h: t.tile_h,
+            spacing: t.spacing,
+            line_h: t.line_h,
+            labels: t.labels,
         }
     }
 
@@ -96,15 +121,29 @@ impl Layout {
         }
     }
 
-    /// The thumbnail box for index i, i.e. the element box minus its padding.
+    /// The thumbnail box for index i: the top of the element, above the label.
     pub fn tile(&self, i: i32) -> Rect {
         let e = self.elem(i);
         Rect {
             x: e.x + self.pad,
             y: e.y + self.pad,
             w: e.w - 2 * self.pad,
-            h: e.h - 2 * self.pad,
+            h: self.tile_h,
         }
+    }
+
+    /// The single line of text under the thumbnail, if labels are drawn.
+    pub fn label(&self, i: i32) -> Option<Rect> {
+        if !self.labels {
+            return None;
+        }
+        let t = self.tile(i);
+        Some(Rect {
+            x: t.x,
+            y: t.y + t.h + self.spacing,
+            w: t.w,
+            h: self.line_h,
+        })
     }
 }
 
@@ -177,6 +216,28 @@ mod tests {
                 let tile = l.tile(i);
                 assert!(tile.w == t.tile_w && tile.h == t.tile_h);
             }
+        }
+    }
+
+    #[test]
+    fn labels_add_a_row_under_each_thumbnail() {
+        let mut t = Theme::default();
+        let with = Layout::new(&t, 4);
+        t.labels = false;
+        let without = Layout::new(&t, 4);
+        let rows = 2;
+        assert_eq!(with.height - without.height, rows * (t.spacing + t.line_h));
+        assert!(without.label(0).is_none());
+
+        let t = Theme::default();
+        let l = Layout::new(&t, 4);
+        for i in 0..4 {
+            let (tile, label, elem) = (l.tile(i), l.label(i).unwrap(), l.elem(i));
+            assert_eq!(tile.h, t.tile_h);
+            assert_eq!(label.y, tile.y + tile.h + t.spacing);
+            assert_eq!(label.w, tile.w);
+            // Everything, padding included, stays inside the element.
+            assert!(label.y + label.h + t.pad <= elem.y + elem.h);
         }
     }
 

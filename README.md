@@ -14,27 +14,35 @@ about 60 ms.
 sway-tree       0.6ms     window list + con_ids over sway IPC
 toplevels       0.2ms     ext-foreign-toplevel-list handles
 constraints     1.5ms     every capture session's buffer size, in one roundtrip
-capture        55.0ms     8 windows, all frames in flight at once
-mapped          4.2ms     layer surface + subsurfaces on screen
+capture        52.5ms     8 windows, all frames in flight at once
+labels          0.0ms     shaped on a worker thread while the captures ran
+mapped          4.9ms     layer surface + subsurfaces on screen
 ```
 
 The capture phase is the compositor reading full-resolution window pixels out of
 the GPU. It is bandwidth-bound (~1.1 GB/s here) and unaffected by how large the
-thumbnails are.
+thumbnails are — which also makes it a free window to do other work in. Loading
+a font and rasterising its first glyphs costs ~20ms, so labels are shaped on a
+worker thread started before the captures and joined after them, and cost
+nothing in wall clock.
 
 ## Status
 
-Working, and usable as a switcher today: a static grid with keyboard navigation.
-Labels, filtering and live previews are next — see the roadmap.
+Working, and usable as a switcher today: a labelled static grid with keyboard
+navigation. Filtering and live previews are next — see the roadmap.
 
 ## Usage
 
 ```
-wlgrid [--print] [--verbose] [--timeout SECS]
+wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
+       [--timeout SECS]
 ```
 
 - `--print` writes the selected sway `con_id` to stdout instead of focusing it
 - `--verbose` prints phase timings and how many windows were captured
+- `--hide-labels` draws an icon-only grid
+- `--font FAMILY` label font family (default `Berkeley Mono`)
+- `--font-size PX` label size in logical px
 - `--timeout SECS` exits after a deadline (an escape hatch: the overlay takes an
   exclusive keyboard grab)
 
@@ -60,8 +68,14 @@ cannot drive it. That goes away with xkb support, which filtering needs anyway.
 
 Colours, font metrics and grid geometry come from the rofi theme this replaces
 (gruvbox dark, a yellow selection filling the element padding, `ceil(sqrt(n))`
-columns capped at 4, 16:9 tiles) and live in `src/theme.rs`. They will move to a
-config file so they can't drift from the `.rasi`.
+columns capped at 4, 16:9 tiles, `title · app` centred underneath) and live in
+`src/theme.rs`. They will move to a config file so they can't drift from the
+`.rasi`.
+
+The font is looked up by family name. Your own font directories are scanned
+first because they are small; the full system scan (~37ms) happens only if the
+family isn't found there, and an unknown family then falls back to whatever
+cosmic-text picks rather than failing. Long titles are ellipsised to the cell.
 
 ## Requirements
 
@@ -79,7 +93,6 @@ unaffected. It matters more once previews are live.
 
 ## Roadmap
 
-- **M2** labels: real text via cosmic-text, `--hide-labels` for an icon-only grid
 - **M3** type-to-filter with fzf-quality fuzzy matching (and xkb keyboard input)
 - **M4** live previews: keep the capture sessions open and re-capture on a rate
   limit, `--live all|current|none`
@@ -89,5 +102,5 @@ unaffected. It matters more once previews are live.
 
 ```
 cargo build --release
-cargo test          # grid geometry
+cargo test          # grid geometry, ellipsising, glyph output
 ```

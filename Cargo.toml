@@ -12,6 +12,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 rustix = { version = "1", features = ["fs", "mm", "shm"] }
 swayipc = "4"
+cosmic-text = "0.19"
 
 [profile.release]
 strip = true
