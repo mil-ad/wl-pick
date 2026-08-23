@@ -1,4 +1,4 @@
-//! wlgrid shows a live grid of every window and display as a layer-shell overlay
+//! wl-pick shows a live grid of every window and display as a layer-shell overlay
 //! and reports which one you picked. That is all it does: acting on the choice
 //! belongs to whatever called it. It replaces a wlthumbs + rofi pipeline, so the
 //! look comes straight from that rofi theme (see theme.rs).
@@ -385,7 +385,7 @@ impl App {
         self.pool_bytes = total;
         // Note: no mmap. The compositor writes these pages and samples them
         // again for display; mapping them here would only cost us the faults.
-        let file = shm::memfd("wlgrid-capture", total)?;
+        let file = shm::memfd("wl-pick-capture", total)?;
         let pool = self.shm.create_pool(file.as_fd(), total as i32, qh, ());
         for (i, slot_offsets) in offsets.iter().enumerate() {
             let (w, h, format) = {
@@ -515,7 +515,7 @@ impl App {
             &surface,
             None, // let the compositor place it on the active output
             Layer::Overlay,
-            "wlgrid".to_string(),
+            "wl-pick".to_string(),
             qh,
             (),
         );
@@ -526,7 +526,7 @@ impl App {
 
         let (pw, ph) = (lw * self.scale, lh * self.scale);
         let len = shm::Chrome::slot_len(pw, ph) * shm::Chrome::SLOTS;
-        let file = shm::memfd("wlgrid-chrome", len)?;
+        let file = shm::memfd("wl-pick-chrome", len)?;
         let pool = self.shm.create_pool(file.as_fd(), len as i32, qh, ());
         for slot in 0..shm::Chrome::SLOTS {
             self.chrome_buffers.push(pool.create_buffer(
@@ -724,9 +724,9 @@ fn pump(
 }
 
 const HELP: &str = "\
-wlgrid — a live grid of window and display previews, for picking one
+wl-pick — a live grid of window and display previews, for picking one
 
-usage: wlgrid [options]
+usage: wl-pick [options]
 
   --format tsv|json|portal  how to report the pick [tsv]
   --live all|current|none   which tiles keep updating live [all]
@@ -766,11 +766,11 @@ formats:
 
             [screencast]
             chooser_type=simple
-            chooser_cmd=wlgrid --format portal
+            chooser_cmd=wl-pick --format portal
 
 focusing on sway:
 
-  IFS=$'\\t' read -r type id toplevel app title < <(wlgrid) &&
+  IFS=$'\\t' read -r type id toplevel app title < <(wl-pick) &&
     case $type in
       window) swaymsg \"[con_id=$id] focus\" ;;
       output) swaymsg \"focus output $id\" ;;
@@ -852,7 +852,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("wlgrid: {e}");
+            eprintln!("wl-pick: {e}");
             ExitCode::FAILURE
         }
     }
@@ -865,7 +865,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     if let Some(d) = args.timeout {
         std::thread::spawn(move || {
             std::thread::sleep(d);
-            eprintln!("wlgrid: timeout");
+            eprintln!("wl-pick: timeout");
             std::process::exit(2);
         });
     }
@@ -955,7 +955,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             );
         }
         eprintln!(
-            "wlgrid: {} window(s), {matched} matched, {ready} captured; \
+            "wl-pick: {} window(s), {matched} matched, {ready} captured; \
              grid {}x{}, surface {}x{} logical at scale {}, {} MB of capture buffers",
             app.tiles.len(),
             app.layout.cols,
@@ -980,7 +980,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         let frames: u32 = app.tiles.iter().map(|t| t.frames).sum();
         let live_for = start.elapsed().as_secs_f64();
         eprintln!(
-            "wlgrid: {frames} frame(s) over {live_for:.1}s = {:.1}/s, {} tick(s), \
+            "wl-pick: {frames} frame(s) over {live_for:.1}s = {:.1}/s, {} tick(s), \
              {} release(s), {} blocked; per tile: {}",
             frames as f64 / live_for,
             app.ticks,
@@ -994,10 +994,10 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         );
     }
 
-    // wlgrid is a chooser: it reports the pick, and what that means is the
+    // wl-pick is a chooser: it reports the pick, and what that means is the
     // caller's business.
     if args.verbose {
-        eprintln!("wlgrid: {}", app.quit_why);
+        eprintln!("wl-pick: {}", app.quit_why);
     }
     let Some(target) = app.activate else {
         return Ok(ExitCode::FAILURE); // cancelled: nothing on stdout
@@ -1010,7 +1010,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             None => {
                 // The portal can only name a window by its foreign-toplevel
                 // identifier, and this one has none; silence means declined.
-                eprintln!("wlgrid: {:?} has no toplevel identifier", target.title);
+                eprintln!("wl-pick: {:?} has no toplevel identifier", target.title);
                 return Ok(ExitCode::FAILURE);
             }
         },
@@ -1126,7 +1126,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 // frame yet leaves the tile without a thumbnail.
                 if tile.frames == 0 {
                     eprintln!(
-                        "wlgrid: capture failed for {:?} ({reason:?})",
+                        "wl-pick: capture failed for {:?} ({reason:?})",
                         tile.target.title
                     );
                     tile.failed = true;

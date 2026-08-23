@@ -1,4 +1,4 @@
-# wlgrid
+# wl-pick
 
 A window switcher for wlroots compositors: a grid overlay of **live** window
 previews that looks like a rofi theme, and tells you which one you picked.
@@ -35,7 +35,7 @@ is the one thing the rofi version had that this doesn't — see the roadmap.
 ## Usage
 
 ```
-wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
+wl-pick [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
        [--live all|current|none] [--fps N] [--timeout SECS]
 ```
 
@@ -48,17 +48,17 @@ wlgrid [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
 - `--timeout SECS` exits after a deadline (an escape hatch: the overlay takes an
   exclusive keyboard grab)
 
-wlgrid is a chooser: it reports what you picked and leaves acting on it to the
+wl-pick is a chooser: it reports what you picked and leaves acting on it to the
 caller. The pick goes to stdout, nothing does if you cancel, and the exit status
 is 0 for a pick and 1 for a cancel.
 
-wlgrid never acts on the choice — it has no idea what you want to do with it.
+wl-pick never acts on the choice — it has no idea what you want to do with it.
 Focusing on sway looks like this:
 
 ```sh
 #!/usr/bin/env bash
 # ~/.local/bin/winmenu, bound to $mod+Tab
-IFS=$'\t' read -r type id toplevel app title < <(wlgrid) || exit 0
+IFS=$'\t' read -r type id toplevel app title < <(wl-pick) || exit 0
 case $type in
     window) swaymsg "[con_id=$id] focus" ;;
     output) swaymsg "focus output $id" ;;
@@ -68,7 +68,7 @@ esac
 Windows only, as a one-liner:
 
 ```sh
-swaymsg "[con_id=$(wlgrid --no-outputs | cut -f2)] focus"
+swaymsg "[con_id=$(wl-pick --no-outputs | cut -f2)] focus"
 ```
 
 Three formats, because the identifiers different consumers need differ:
@@ -80,13 +80,13 @@ Three formats, because the identifiers different consumers need differ:
 | `portal` | `Monitor: NAME` or `Window: TOPLEVEL_ID` |
 
 `portal` is exactly what xdg-desktop-portal-wlr's `simple` chooser reads, so
-wlgrid can be the picker for `getDisplayMedia` and friends — with live previews
+wl-pick can be the picker for `getDisplayMedia` and friends — with live previews
 of both windows and displays:
 
 ```ini
 [screencast]
 chooser_type=simple
-chooser_cmd=wlgrid --format portal
+chooser_cmd=wl-pick --format portal
 ```
 
 | key | |

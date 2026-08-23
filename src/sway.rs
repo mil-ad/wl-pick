@@ -2,7 +2,7 @@
 //! Wayland side only supplies pixels. The join between the two is
 //! `foreign_toplevel_identifier`, which sway reports per view.
 //!
-//! Acting on the choice is deliberately not here: wlgrid reports what was picked
+//! Acting on the choice is deliberately not here: wl-pick reports what was picked
 //! and the caller decides what that means.
 
 use swayipc::{Connection, Node, NodeType};
