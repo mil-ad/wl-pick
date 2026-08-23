@@ -38,14 +38,26 @@ fn collect(node: &Node, out: &mut Vec<Target>) {
     }
 }
 
-/// The largest integer scale in use, which is what the overlay renders at.
-pub fn scale(conn: &mut Connection) -> Result<i32, swayipc::Error> {
-    Ok(conn
+/// The active displays, and the scale the overlay should render at: the largest
+/// in use, rounded up, since a buffer can be downscaled but not invented.
+pub struct Displays {
+    pub(crate) names: Vec<String>,
+    pub(crate) scale: i32,
+}
+
+pub fn displays(conn: &mut Connection) -> Result<Displays, swayipc::Error> {
+    let active: Vec<_> = conn
         .get_outputs()?
-        .iter()
+        .into_iter()
         .filter(|o| o.active)
-        .map(|o| o.scale.unwrap_or(1.0).ceil() as i32)
-        .max()
-        .unwrap_or(1)
-        .max(1))
+        .collect();
+    Ok(Displays {
+        scale: active
+            .iter()
+            .map(|o| o.scale.unwrap_or(1.0).ceil() as i32)
+            .max()
+            .unwrap_or(1)
+            .max(1),
+        names: active.into_iter().map(|o| o.name).collect(),
+    })
 }

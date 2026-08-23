@@ -6,6 +6,17 @@
 
 use std::fmt;
 
+/// How a pick is written to stdout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Tab-separated columns, for `IFS=$'\t' read` or cut(1).
+    Tsv,
+    /// The same record as one JSON object.
+    Json,
+    /// What xdg-desktop-portal-wlr's `simple` chooser accepts.
+    Portal,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Window,
@@ -111,6 +122,16 @@ impl Target {
             esc(&self.app),
             esc(&self.title)
         )
+    }
+
+    /// Render for `format`. `None` means this target cannot be named in that
+    /// format, which only the portal one can fail at.
+    pub fn render(&self, format: Format) -> Option<String> {
+        match format {
+            Format::Tsv => Some(self.tsv()),
+            Format::Json => Some(self.json()),
+            Format::Portal => self.portal(),
+        }
     }
 
     /// What xdg-desktop-portal-wlr's `simple` chooser accepts: `Monitor: NAME`

@@ -35,25 +35,26 @@ is the one thing the rofi version had that this doesn't — see the roadmap.
 ## Usage
 
 ```
-wl-pick [--print] [--verbose] [--hide-labels] [--font FAMILY] [--font-size PX]
-       [--live all|current|none] [--fps N] [--timeout SECS]
+wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
+        [--no-outputs] [--hide-labels] [--font FAMILY] [--font-size PX]
+        [--timeout SECS] [--verbose]
 ```
 
-- `--verbose` prints phase timings and how many windows were captured
+- `--format tsv|json|portal` how to report the pick (default `tsv`)
+- `--live all|current|none` which tiles keep updating (default `all`; displays
+  are always a single snapshot)
+- `--fps N` cap on live updates per tile per second (default 12)
+- `--no-outputs` windows only; displays are included as tiles by default
 - `--hide-labels` draws an icon-only grid
 - `--font FAMILY` label font family (default `Berkeley Mono`)
 - `--font-size PX` label size in logical px
-- `--live all|current|none` which tiles keep updating (default `all`)
-- `--fps N` cap on updates per tile per second (default 12)
-- `--timeout SECS` exits after a deadline (an escape hatch: the overlay takes an
-  exclusive keyboard grab)
+- `--timeout SECS` exits after a deadline, in case the keyboard grab ever traps
+  you
+- `--verbose` phase timings, the tile list, and capture stats
 
-wl-pick is a chooser: it reports what you picked and leaves acting on it to the
-caller. The pick goes to stdout, nothing does if you cancel, and the exit status
-is 0 for a pick and 1 for a cancel.
-
-wl-pick never acts on the choice — it has no idea what you want to do with it.
-Focusing on sway looks like this:
+wl-pick is a chooser: the pick goes to stdout, nothing does if you cancel, and
+the exit status is 0 for a pick and 1 for a cancel. It never acts on the choice —
+it has no idea what you want to do with it. Focusing on sway looks like this:
 
 ```sh
 #!/usr/bin/env bash
@@ -121,9 +122,9 @@ from being expensive:
   back, so the slot on screen is usually free too — waiting for it to stop being
   displayed instead deadlocks after two frames.
 
-The cost is memory and bandwidth: two full-resolution buffers per window (110 MB
-of shm for ten windows on this display, versus 55 MB with `--live none`) and a
-readback per refreshed frame. `--live current` refreshes only the selected tile,
+The cost is memory and bandwidth: two full-resolution buffers per window (138 MB
+of shm for eight windows and a display here, against 83 MB with `--live none`)
+and a readback per refreshed frame. `--live current` refreshes only the selected tile,
 which is much cheaper and still reads as alive.
 
 ## Look
@@ -131,8 +132,8 @@ which is much cheaper and still reads as alive.
 Colours, font metrics and grid geometry come from the rofi theme this replaces
 (gruvbox dark, a yellow selection filling the element padding, `ceil(sqrt(n))`
 columns capped at 4, 16:9 tiles, `title · app` centred underneath) and live in
-`src/theme.rs`. They will move to a config file so they can't drift from the
-`.rasi`.
+`src/theme.rs`, which is the one place to change them. They are not
+configurable at runtime beyond the font flags.
 
 The font is looked up by family name. Your own font directories are scanned
 first because they are small; the full system scan (~37ms) happens only if the
@@ -161,9 +162,24 @@ unaffected. It matters more once previews are live.
 - dmabuf capture, so the pixels never leave the GPU at all — and live previews
   stop costing a readback per frame
 
+## Source layout
+
+```
+main.rs     orchestration: list, capture, map, report the pick
+cli.rs      flags, defaults, and the help text that documents them
+sway.rs     the window list and display names, over sway's IPC socket
+target.rs   what a tile stands for, and the three output formats
+app.rs      the Wayland client state every event dispatches into
+capture.rs  capture sessions, their buffers, and the live clock
+overlay.rs  the layer surface, the drawing, and the keyboard
+theme.rs    colours, grid geometry, aspect fitting
+text.rs     label shaping on a worker thread
+shm.rs      memfd allocation and the ARGB painter
+```
+
 ## Building
 
 ```
 cargo build --release
-cargo test          # grid geometry, ellipsising, glyph output
+cargo test          # grid geometry, ellipsising, output formats, glyph output
 ```

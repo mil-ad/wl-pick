@@ -155,6 +155,18 @@ pub struct Rect {
     pub h: i32,
 }
 
+impl Rect {
+    /// Logical to physical, for painting into a scaled buffer.
+    pub fn scaled(self, scale: i32) -> Self {
+        Self {
+            x: self.x * scale,
+            y: self.y * scale,
+            w: self.w * scale,
+            h: self.h * scale,
+        }
+    }
+}
+
 /// Scale (w, h) to fit inside (bw, bh), keeping the aspect ratio, and centre it.
 /// Windows are usually portrait-ish next to a 16:9 cell, so this letterboxes the
 /// same way rofi's `element-icon { size: W H }` does.

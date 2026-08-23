@@ -2,7 +2,7 @@
 name = "wl-pick"
 version = "0.1.0"
 edition = "2024"
-description = "Live window switcher for wlroots compositors: a thumbnail grid with the look of a rofi theme"
+description = "A live grid of window and display previews, for picking one"
 license = "MIT"
 
 [dependencies]
