@@ -29,9 +29,10 @@ pub struct Theme {
     pub max_cols: i32,
     /// Gap between a thumbnail and its label (rasi `element { spacing }`).
     pub spacing: i32,
-    /// Label font: a family name resolved against system fonts, with whatever
-    /// cosmic-text falls back to if it is missing. Size and line height are
-    /// logical px — rofi's "Berkeley Mono 12" at pango size="small".
+    /// Label font family, resolved against the system's fonts. The default is
+    /// the generic "monospace", which becomes whatever fontconfig says that is
+    /// here. Size and line height are logical px, matching the rofi theme the
+    /// look came from (12pt at pango size="small").
     pub font: String,
     pub font_px: f32,
     pub line_h: i32,
@@ -55,7 +56,7 @@ impl Default for Theme {
             margin: 12,
             max_cols: 4,
             spacing: 10,
-            font: "Berkeley Mono".to_string(),
+            font: crate::text::SYSTEM_MONO.to_string(),
             font_px: 13.3,
             line_h: 17,
             labels: true,

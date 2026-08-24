@@ -12,8 +12,7 @@
 use std::thread::{self, JoinHandle};
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Stretch, SwashCache, Weight,
-    Wrap, fontdb,
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap, fontdb,
 };
 
 use crate::shm::Painter;
@@ -23,6 +22,7 @@ pub struct Labels {
     fs: FontSystem,
     cache: SwashCache,
     lines: Vec<Buffer>,
+    family: String,
 }
 
 /// Shape `texts` into one centred single line each, at most `box_w` wide.
@@ -36,37 +36,94 @@ pub fn spawn(
     thread::spawn(move || build(texts, family, font_px, line_h, box_w))
 }
 
+/// The default family: whatever this system calls its monospace font.
+pub const SYSTEM_MONO: &str = "monospace";
+
+/// Families to try when fontconfig cannot be asked, roughly in order of how
+/// likely a distribution is to ship one as its default monospace.
+const MONO_CANDIDATES: &[&str] = &[
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Adwaita Mono",
+    "Source Code Pro",
+    "Hack",
+    "Fira Mono",
+    "Courier New",
+];
+
 /// Load the smallest font database that can render `family`.
 ///
 /// `FontSystem::new()` scans every system font, which costs ~37ms — most of the
 /// startup budget. A user's own font directories are tiny by comparison, so try
-/// those first and only pay for the full scan when the family really isn't
-/// there (which is also what makes an unknown family fall back gracefully).
+/// those first and only pay for the full scan when the family really isn't there
+/// (which is also what makes an unknown family fall back gracefully). The
+/// generic default lives among the system fonts, so it skips that shortcut.
 fn font_db(family: &str) -> FontSystem {
     let mut db = fontdb::Database::new();
-    if let Ok(home) = std::env::var("HOME") {
-        db.load_fonts_dir(format!("{home}/.fonts"));
-        db.load_fonts_dir(format!("{home}/.local/share/fonts"));
+    if !is_generic(family) {
+        if let Ok(home) = std::env::var("HOME") {
+            db.load_fonts_dir(format!("{home}/.fonts"));
+            db.load_fonts_dir(format!("{home}/.local/share/fonts"));
+        }
+        if has_family(&db, family) {
+            // The locale only orders CJK fallbacks; labels are ids and titles.
+            return FontSystem::new_with_locale_and_db("en-US".to_string(), db);
+        }
     }
-    let found = db
-        .faces()
-        .any(|f| f.families.iter().any(|(name, _)| name == family));
-    if !found {
-        db.load_system_fonts();
-    }
-    // The locale only orders CJK fallbacks; labels here are app ids and titles.
+    db.load_system_fonts();
     FontSystem::new_with_locale_and_db("en-US".to_string(), db)
+}
+
+fn is_generic(family: &str) -> bool {
+    family.eq_ignore_ascii_case(SYSTEM_MONO)
+}
+
+fn has_family(db: &fontdb::Database, family: &str) -> bool {
+    db.faces()
+        .any(|f| f.families.iter().any(|(name, _)| name == family))
+}
+
+/// Turn the generic default into a real family name.
+///
+/// cosmic-text's own generic resolves through fontdb's built-in preference
+/// ("FreeMono"), which is usually absent and then lands on an arbitrary face — so
+/// ask fontconfig instead, since that is what the rest of the desktop uses. A
+/// named family passes through untouched; if it turns out to be missing,
+/// cosmic-text falls back on its own.
+fn resolve_family(db: &fontdb::Database, family: &str) -> String {
+    if !is_generic(family) {
+        return family.to_string();
+    }
+    fc_match_mono()
+        .filter(|name| has_family(db, name))
+        .or_else(|| {
+            MONO_CANDIDATES
+                .iter()
+                .find(|name| has_family(db, name))
+                .map(|name| name.to_string())
+        })
+        .unwrap_or_else(|| family.to_string())
+}
+
+/// What fontconfig says "monospace" means here. A system without the fontconfig
+/// tools is not an error: the candidate list covers the common defaults.
+fn fc_match_mono() -> Option<String> {
+    let out = std::process::Command::new("fc-match")
+        .args(["-f", "%{family}", SYSTEM_MONO])
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    // fc-match can answer with several comma-separated aliases for one face.
+    let first = text.split(',').next()?.trim().to_string();
+    (!first.is_empty()).then_some(first)
 }
 
 fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f32) -> Labels {
     let mut fs = font_db(&family);
     let mut cache = SwashCache::new();
-    // An unknown family is not an error: cosmic-text falls back to a system
-    // face, which is the whole reason the font is named rather than pathed.
-    let attrs = Attrs::new()
-        .family(Family::Name(&family))
-        .weight(Weight(500))
-        .stretch(Stretch::SemiCondensed);
+    let family = resolve_family(fs.db(), &family);
+    let attrs = Attrs::new().family(Family::Name(&family));
     let metrics = Metrics::new(font_px, line_h);
 
     let mut lines = Vec::with_capacity(texts.len());
@@ -80,7 +137,12 @@ fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f
         buf.draw(&mut fs, &mut cache, Color::rgb(0, 0, 0), |_, _, _, _, _| {});
         lines.push(buf);
     }
-    Labels { fs, cache, lines }
+    Labels {
+        fs,
+        cache,
+        lines,
+        family,
+    }
 }
 
 /// Shorten `text` until it fits in `box_w`, ending with an ellipsis — window
@@ -124,6 +186,12 @@ fn ellipsize(
 }
 
 impl Labels {
+    /// The family the labels were actually shaped with, which for the generic
+    /// default depends on what this system has installed.
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
     /// Draw label `i` inside `at` (physical px), clipped to it.
     pub fn draw(&mut self, p: &mut Painter, i: usize, at: Rect, color: Argb) {
         let Some(buf) = self.lines.get_mut(i) else {
@@ -169,6 +237,19 @@ mod tests {
             .filter(|c| c[0] != 0 || c[1] != 0 || c[2] != 0)
             .count();
         assert!(touched > 20, "only {touched} pixels were painted");
+    }
+
+    #[test]
+    fn the_generic_default_resolves_to_a_real_monospace_family() {
+        let fs = font_db(SYSTEM_MONO);
+        let resolved = resolve_family(fs.db(), SYSTEM_MONO);
+        assert_ne!(resolved, SYSTEM_MONO, "should have named a real family");
+        assert!(
+            has_family(fs.db(), &resolved),
+            "{resolved:?} is not in the database"
+        );
+        // A named family passes through, present or not.
+        assert_eq!(resolve_family(fs.db(), "Some Font"), "Some Font");
     }
 
     #[test]

@@ -46,7 +46,7 @@ wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
 - `--fps N` cap on live updates per tile per second (default 12)
 - `--no-outputs` windows only; displays are included as tiles by default
 - `--hide-labels` draws an icon-only grid
-- `--font FAMILY` label font family (default `Berkeley Mono`)
+- `--font FAMILY` label font family (default: the system monospace font)
 - `--font-size PX` label size in logical px
 - `--timeout SECS` exits after a deadline, in case the keyboard grab ever traps
   you
@@ -143,10 +143,18 @@ columns capped at 4, 16:9 tiles, `title · app` centred underneath) and live in
 `src/theme.rs`, which is the one place to change them. They are not
 configurable at runtime beyond the font flags.
 
-The font is looked up by family name. Your own font directories are scanned
-first because they are small; the full system scan (~37ms) happens only if the
-family isn't found there, and an unknown family then falls back to whatever
-cosmic-text picks rather than failing. Long titles are ellipsised to the cell.
+The label font defaults to the system monospace font — whatever `fc-match
+monospace` answers, which is what the rest of the desktop uses. (cosmic-text's
+own generic resolves through a built-in preference that is usually not
+installed, and then lands on an arbitrary face, so it is asked directly
+instead; if fontconfig isn't available, a short list of common distribution
+defaults is tried.) `--font` names a family instead, and `--verbose` reports
+which family the labels were actually shaped with.
+
+Naming a family scans your own font directories first because they are small;
+the full system scan (~37ms) happens only if it isn't found there. An unknown
+family falls back to whatever cosmic-text picks rather than failing. Long titles
+are ellipsised to the cell.
 
 ## Requirements
 

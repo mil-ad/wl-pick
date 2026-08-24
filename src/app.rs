@@ -221,7 +221,7 @@ impl App {
         }
         eprintln!(
             "wl-pick: {} tile(s), {} captured; grid {}x{}, surface {}x{} logical \
-             at scale {}, {} MB of capture buffers",
+             at scale {}, {} MB of capture buffers, labels in {:?}",
             self.tiles.len(),
             self.tiles.iter().filter(|t| t.ready).count(),
             self.layout.cols,
@@ -230,6 +230,7 @@ impl App {
             self.layout.height,
             self.scale,
             self.stats.pool_bytes >> 20,
+            self.labels.as_ref().map(|l| l.family()).unwrap_or("none"),
         );
     }
 

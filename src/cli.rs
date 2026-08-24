@@ -18,7 +18,7 @@ usage: wl-pick [options]
   --fps N                   cap on live updates per tile per second [12]
   --no-outputs              windows only; displays are included by default
   --hide-labels             draw an icon-only grid
-  --font FAMILY             label font family [Berkeley Mono]
+  --font FAMILY             label font family [the system monospace font]
   --font-size PX            label size in logical px [13.3]
   --timeout SECS            exit anyway after SECS, in case the keyboard
                             grab ever traps you [off]
