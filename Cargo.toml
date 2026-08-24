@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "A live grid of window and display previews, for picking one"
 license = "MIT"
+repository = "https://github.com/mil-ad/wl-pick"
+readme = "README.md"
+keywords = ["wayland", "sway", "wlroots", "screencast", "switcher"]
+categories = ["command-line-utilities", "os::unix-apis"]
+# let-chains, which are edition 2024 and stable from here on
+rust-version = "1.88"
 
 [dependencies]
 wayland-client = "0.31"
