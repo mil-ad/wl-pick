@@ -19,6 +19,10 @@
 //! - `overlay` — the layer surface, the drawing, the keyboard
 //! - `theme`, `text`, `shm` — look, labels, and shared memory
 
+// `slice::as_chunks` and friends, which clippy suggests in place of
+// `chunks_exact`, are newer than the toolchain this crate says it supports.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 mod app;
 mod capture;
 mod cli;
