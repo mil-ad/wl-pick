@@ -101,7 +101,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             theme.font.clone(),
             theme.font_px * scale as f32,
             (theme.line_h * scale) as f32,
-            (layout.label(0).map(|r| r.w).unwrap_or(theme.tile_w) * scale) as f32,
+            (layout.label(0, 0).map(|r| r.w).unwrap_or(theme.tile_w) * scale) as f32,
         )
     });
 
@@ -134,12 +134,20 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     app.show(&qh)?;
     pump(&mut queue, &mut app, |a| a.configured)?;
     app.paint();
-    app.place_tiles(&qh);
+    app.sync_tiles(&qh);
     app.arm_frame_callback(&qh);
     conn.flush()?;
     phases.mark("mapped");
 
-    pump(&mut queue, &mut app, |a| a.finished())?;
+    // Scrolling re-places the subsurfaces; doing it here rather than inside the
+    // key handler coalesces a held-down arrow into one update per dispatch.
+    while !app.finished() {
+        queue.blocking_dispatch(&mut app)?;
+        if std::mem::take(&mut app.needs_tiles) {
+            app.sync_tiles(&qh);
+            conn.flush()?;
+        }
+    }
     if opts.verbose {
         app.report(start.elapsed());
     }

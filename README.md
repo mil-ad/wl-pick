@@ -95,7 +95,7 @@ chooser_cmd=wl-pick --format portal
 |---|---|
 | `→` `←` / `l` `h` / `Tab` `Shift+Tab` | next / previous tile |
 | `↓` `↑` / `j` `k` | move a row |
-| `Home` `End` | first / last |
+| `Home` `End` / `PgUp` `PgDn` | first / last, or a screen at a time |
 | `Enter` | pick the selection |
 | `Escape` / `q` | cancel |
 | click | pick that tile |
@@ -170,12 +170,18 @@ time it runs. On a mixed setup one file gives 18% of a 1280-wide laptop panel an
 wrong on the other. The overlay is mapped explicitly on that display, at that
 display's scale, so mixed-DPI renders crisply either way.
 
-`tile-width` and `tile-height` are maxima for the thumbnail cell. Give only the
-width and the height follows the display's aspect, which is roughly the shape of
-the windows on it — a 16:9 cell wastes about half its area on a portrait monitor.
-If the grid would outgrow the display, tiles shrink together and keep their
-shape, so thirty windows give small tiles rather than a surface larger than the
-screen.
+`tile-width` and `tile-height` set how big a thumbnail actually is. Give only
+the width and the height follows the display's aspect, which is roughly the shape
+of the windows on it — a 16:9 cell wastes about half its area on a portrait
+monitor.
+
+When there are more rows than the display can show, **the grid scrolls**: the
+tile size you asked for is honoured and a scrollbar appears in the right margin.
+Any move keeps the selection in view, `PgUp`/`PgDn` jump a screen, and tiles
+scrolled out of sight are unmapped — so live capture skips them too, which is
+what stops a long list costing bandwidth for pixels nobody sees. Only a tile too
+large for even one row or column is shrunk, since then nothing could be shown at
+all.
 
 ## Look
 

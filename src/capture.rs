@@ -328,6 +328,11 @@ impl App {
             if self.tiles[i].target.kind == Kind::Output {
                 continue;
             }
+            // Nor is there any point refreshing a tile that is scrolled out of
+            // sight — that is a readback for pixels nobody sees.
+            if self.layout.tile(i as i32, self.scroll).is_none() {
+                continue;
+            }
             let t = &self.tiles[i];
             if t.slots.is_empty() || t.frame.is_some() {
                 continue;

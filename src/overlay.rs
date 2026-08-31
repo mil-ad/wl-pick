@@ -47,6 +47,8 @@ const KEY_LEFT: u32 = 105;
 const KEY_RIGHT: u32 = 106;
 const KEY_END: u32 = 107;
 const KEY_DOWN: u32 = 108;
+const KEY_PGUP: u32 = 104;
+const KEY_PGDN: u32 = 109;
 
 /// evdev button code, as wl_pointer reports it.
 const BTN_LEFT: u32 = 0x110;
@@ -107,11 +109,20 @@ impl App {
         Ok(())
     }
 
-    /// Attach each captured buffer to its own subsurface and let the compositor
-    /// scale it into the tile rectangle.
-    pub fn place_tiles(&mut self, qh: &QueueHandle<Self>) {
+    /// Put every visible tile where the viewport says, and unmap the rest.
+    ///
+    /// Runs again after each scroll, so a tile scrolled off screen gets a null
+    /// buffer — the way to hide a subsurface — rather than being left behind.
+    /// Scaling stays the compositor's job: the capture buffer is attached as it
+    /// is, and wp_viewporter names the rectangle to fit it into.
+    pub fn sync_tiles(&mut self, qh: &QueueHandle<Self>) {
         let parent = self.surface.clone().expect("show() runs first");
+        let scroll = self.scroll;
         for i in 0..self.tiles.len() {
+            let Some(box_) = self.layout.tile(i as i32, scroll) else {
+                self.hide_tile(i);
+                continue;
+            };
             if !self.tiles[i].ready {
                 continue;
             }
@@ -121,42 +132,69 @@ impl App {
             } else {
                 (bw as i32, bh as i32)
             };
-            let dst = fit_centred(fit_w, fit_h, self.layout.tile(i as i32));
-            let surface = self.compositor.create_surface(qh, ());
-            let subsurface = self.subcompositor.get_subsurface(&surface, &parent, qh, ());
-            let viewport = self.viewporter.get_viewport(&surface, qh, ());
+            let dst = fit_centred(fit_w, fit_h, box_);
+            if self.tiles[i].surface.is_none() {
+                let surface = self.compositor.create_surface(qh, ());
+                let subsurface = self.subcompositor.get_subsurface(&surface, &parent, qh, ());
+                let viewport = self.viewporter.get_viewport(&surface, qh, ());
+                // Tiles change independently of the chrome — a live frame
+                // arrives whenever its window does — so they must not wait on a
+                // parent commit.
+                subsurface.set_desync();
+                // The capture protocol reports the transform the compositor
+                // already applied to the buffer, which is exactly what this
+                // request means, so it passes straight through.
+                surface.set_buffer_transform(self.tiles[i].transform);
+                let t = &mut self.tiles[i];
+                t.surface = Some(surface);
+                t.subsurface = Some(subsurface);
+                t.viewport = Some(viewport);
+            }
+            let t = &self.tiles[i];
+            let (surface, subsurface, viewport) = (
+                t.surface.clone().expect("just created"),
+                t.subsurface.clone().expect("just created"),
+                t.viewport.clone().expect("just created"),
+            );
+            let slot = t.showing.expect("a ready tile has a slot");
             subsurface.set_position(dst.x, dst.y);
-            // Tiles change independently of the chrome — a live frame arrives
-            // whenever its window does — so they must not wait on a parent
-            // commit.
-            subsurface.set_desync();
-            // The capture protocol reports the transform the compositor already
-            // applied to the buffer, which is exactly what this request means,
-            // so it passes straight through and the compositor un-rotates it.
-            surface.set_buffer_transform(self.tiles[i].transform);
             viewport.set_destination(dst.w, dst.h);
-            let slot = self.tiles[i].showing.expect("a ready tile has a slot");
-            surface.attach(Some(&self.tiles[i].slots[slot].buffer), 0, 0);
+            surface.attach(Some(&t.slots[slot].buffer), 0, 0);
             surface.damage_buffer(0, 0, bw as i32, bh as i32);
             surface.commit();
-            let t = &mut self.tiles[i];
-            t.surface = Some(surface);
-            t.subsurface = Some(subsurface);
-            t.viewport = Some(viewport);
         }
         // Subsurface placement is *parent* state: it only takes effect when the
         // parent commits, desynced children included.
         parent.commit();
     }
 
+    /// Unmap a tile's subsurface by attaching nothing to it.
+    fn hide_tile(&mut self, i: usize) {
+        if let Some(surface) = self.tiles[i].surface.clone() {
+            surface.attach(None, 0, 0);
+            surface.commit();
+        }
+    }
+
     /// Repaint background, selection highlight, labels and border.
     pub fn paint(&mut self) {
-        let (scale, sel) = (self.scale, self.sel);
-        let elem = self.layout.elem(sel as i32).scaled(scale);
+        let (scale, sel, scroll) = (self.scale, self.sel, self.scroll);
         // Gather geometry before borrowing the chrome and the labels together.
+        let elem = self
+            .layout
+            .elem(sel as i32, scroll)
+            .map(|r| r.scaled(scale));
         let label_boxes: Vec<(usize, Rect)> = (0..self.tiles.len())
-            .filter_map(|i| self.layout.label(i as i32).map(|r| (i, r.scaled(scale))))
+            .filter_map(|i| {
+                self.layout
+                    .label(i as i32, scroll)
+                    .map(|r| (i, r.scaled(scale)))
+            })
             .collect();
+        let bar = self
+            .layout
+            .scrollbar(scroll, (self.theme.margin / 3).max(2))
+            .map(|(track, thumb)| (track.scaled(scale), thumb.scaled(scale)));
         let t = &self.theme;
         let (bg, sel_bg, fg, sel_fg, border, border_px) = (
             t.bg,
@@ -175,12 +213,20 @@ impl App {
         let mut p = chrome.painter();
         p.fill(bg);
         // The selection fills the whole element box, padding included — the same
-        // thing rofi's element background does.
-        p.rect(elem, sel_bg);
+        // thing rofi's element background does. It can be scrolled out of sight.
+        if let Some(elem) = elem {
+            p.rect(elem, sel_bg);
+        }
         if let Some(labels) = labels {
             for (i, at) in label_boxes {
                 labels.draw(&mut p, i, at, if i == sel { sel_fg } else { fg });
             }
+        }
+        // A scrollbar only appears when there is something to scroll, which
+        // makes it a hint rather than furniture.
+        if let Some((track, thumb)) = bar {
+            p.rect(track, bg);
+            p.rect(thumb, border);
         }
         p.frame(border_px, border);
 
@@ -195,17 +241,27 @@ impl App {
         if n == 0 {
             return;
         }
-        self.sel = (self.sel as i32 + delta).rem_euclid(n) as usize;
-        self.paint();
+        self.select((self.sel as i32 + delta).rem_euclid(n) as usize);
     }
 
     fn move_row(&mut self, rows: i32) {
         let n = self.tiles.len() as i32;
         let target = self.sel as i32 + rows * self.layout.cols;
         if target >= 0 && target < n {
-            self.sel = target as usize;
-            self.paint();
+            self.select(target as usize);
         }
+    }
+
+    /// Move the selection, scrolling the least that keeps it on screen. Every
+    /// keyboard move goes through here, so the selection is never off-view.
+    fn select(&mut self, i: usize) {
+        self.sel = i;
+        let scroll = self.layout.reveal(i, self.scroll);
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            self.needs_tiles = true;
+        }
+        self.paint();
     }
 
     /// The tile under the pointer, if it is over one. A tile's own subsurface
@@ -219,7 +275,7 @@ impl App {
             .position(|t| t.surface.as_ref() == Some(&hover.surface));
         on_tile.or_else(|| {
             (Some(&hover.surface) == self.surface.as_ref())
-                .then(|| self.layout.hit(hover.x as i32, hover.y as i32))
+                .then(|| self.layout.hit(hover.x as i32, hover.y as i32, self.scroll))
                 .flatten()
         })
     }
@@ -251,14 +307,10 @@ impl App {
             KEY_LEFT | KEY_H => self.move_sel(-1),
             KEY_DOWN | KEY_J => self.move_row(1),
             KEY_UP | KEY_K => self.move_row(-1),
-            KEY_HOME => {
-                self.sel = 0;
-                self.paint();
-            }
-            KEY_END => {
-                self.sel = self.tiles.len().saturating_sub(1);
-                self.paint();
-            }
+            KEY_HOME => self.select(0),
+            KEY_END => self.select(self.tiles.len().saturating_sub(1)),
+            KEY_PGUP => self.move_row(-self.layout.visible_rows),
+            KEY_PGDN => self.move_row(self.layout.visible_rows),
             _ => {}
         }
     }

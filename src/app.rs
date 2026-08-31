@@ -88,6 +88,10 @@ pub struct App {
     pub(crate) fps: u32,
     pub(crate) scale: i32,
     pub(crate) sel: usize,
+    /// First row of the grid on screen. The rest scroll.
+    pub(crate) scroll: i32,
+    /// Set when the viewport moved and the subsurfaces need re-placing.
+    pub(crate) needs_tiles: bool,
     pub(crate) shift: bool,
 
     /// Where the pointer is, and which tile it pressed. Hovering deliberately
@@ -185,6 +189,8 @@ impl App {
             fps,
             scale,
             sel: 0,
+            scroll: 0,
+            needs_tiles: false,
             shift: false,
             hover: None,
             pressed: None,
@@ -243,6 +249,12 @@ impl App {
             self.stats.pool_bytes >> 20,
             self.labels.as_ref().map(|l| l.family()).unwrap_or("none"),
         );
+        if self.layout.scrollable() {
+            eprintln!(
+                "wl-pick: {} of {} rows fit; the rest scroll",
+                self.layout.visible_rows, self.layout.rows
+            );
+        }
     }
 
     /// What live capture actually did, once the overlay is closing.

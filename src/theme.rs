@@ -66,7 +66,9 @@ impl Default for Theme {
 #[derive(Debug)]
 pub struct Layout {
     pub cols: i32,
+    /// Rows the whole grid needs, and how many of them fit on screen at once.
     pub rows: i32,
+    pub visible_rows: i32,
     /// How many tiles there are, which the last row may not fill.
     n: i32,
     pub width: i32,
@@ -82,37 +84,42 @@ pub struct Layout {
     labels: bool,
 }
 
-/// How much of the display the grid may occupy before tiles start shrinking.
+/// How much of the display the grid may occupy.
 const FILL: i32 = 90;
 
 impl Layout {
     /// A balanced grid: ceil(sqrt(n)) columns, capped, so the last row isn't
     /// ragged (6 windows -> 3x2, not 4x2 with two holes). Same rule rofigrid uses.
     ///
-    /// `display` is the logical size of the screen this will appear on. Tiles are
-    /// the size the theme asks for until the grid would outgrow the screen, at
-    /// which point they shrink together — keeping their aspect — so thirty
-    /// windows give small tiles rather than a surface larger than the monitor.
+    /// Tiles are the size the theme asks for — a configured size that quietly
+    /// shrank would be a setting ignored — so when the grid needs more rows than
+    /// the display can show, the extra rows scroll. Only a tile too large for
+    /// even one row or column is shrunk, since then something has to give.
     pub fn new(t: &Theme, n: i32, display: (i32, i32)) -> Self {
+        let (dw, dh) = (display.0.max(1), display.1.max(1));
+        let room_w = (dw * FILL / 100 - 2 * t.margin).max(1);
+        let room_h = (dh * FILL / 100 - 2 * t.margin).max(1);
+        let label_row = if t.labels { t.spacing + t.line_h } else { 0 };
+        let (tile_w, tile_h) = shrink_to_one(t, label_row, room_w, room_h);
+        let (elem_w, elem_h) = (tile_w + 2 * t.pad, tile_h + label_row + 2 * t.pad);
+
+        // Columns: the balanced rule, capped by the config and by what fits.
         let mut cols = (n as f64).sqrt() as i32;
         if cols * cols < n {
             cols += 1;
         }
-        cols = cols.clamp(1, t.max_cols);
+        let fit_cols = ((room_w + t.gap) / (elem_w + t.gap)).max(1);
+        cols = cols.clamp(1, t.max_cols.min(fit_cols)).max(1);
         let rows = (n + cols - 1) / cols;
-        // An element is the thumbnail, optionally a label under it, and padding.
-        let label_row = if t.labels { t.spacing + t.line_h } else { 0 };
-        let (tile_w, tile_h) = fit_grid(t, n, cols, rows, label_row, display);
-        let (elem_w, elem_h) = (tile_w + 2 * t.pad, tile_h + label_row + 2 * t.pad);
+        let visible_rows = ((room_h + t.gap) / (elem_h + t.gap)).clamp(1, rows.max(1));
+
         Self {
             cols,
             rows,
+            visible_rows,
             n,
-            // Padding, gaps and label rows can outgrow a small display all by
-            // themselves, so the surface is capped: better a clipped last row
-            // than asking for a window larger than the screen showing it.
-            width: (cols * elem_w + (cols - 1) * t.gap + 2 * t.margin).min(display.0.max(1)),
-            height: (rows * elem_h + (rows - 1) * t.gap + 2 * t.margin).min(display.1.max(1)),
+            width: cols * elem_w + (cols - 1) * t.gap + 2 * t.margin,
+            height: visible_rows * elem_h + (visible_rows - 1) * t.gap + 2 * t.margin,
             elem_w,
             elem_h,
             margin: t.margin,
@@ -125,43 +132,82 @@ impl Layout {
         }
     }
 
-    /// The element box for index i — what the selection highlight fills.
-    pub fn elem(&self, i: i32) -> Rect {
-        let (col, row) = (i % self.cols, i / self.cols);
-        Rect {
-            x: self.margin + col * (self.elem_w + self.gap),
-            y: self.margin + row * (self.elem_h + self.gap),
-            w: self.elem_w,
-            h: self.elem_h,
-        }
+    /// The furthest the viewport can scroll, in rows.
+    pub fn max_scroll(&self) -> i32 {
+        (self.rows - self.visible_rows).max(0)
     }
 
-    /// The thumbnail box for index i: the top of the element, above the label.
-    pub fn tile(&self, i: i32) -> Rect {
-        let e = self.elem(i);
-        Rect {
+    pub fn scrollable(&self) -> bool {
+        self.max_scroll() > 0
+    }
+
+    pub fn row_of(&self, i: usize) -> i32 {
+        i as i32 / self.cols
+    }
+
+    /// Where the viewport must sit for tile `i` to be on screen, moving as
+    /// little as possible from `scroll`.
+    pub fn reveal(&self, i: usize, scroll: i32) -> i32 {
+        let row = self.row_of(i);
+        let top = row.min(scroll);
+        let bottom = (row - self.visible_rows + 1).max(top);
+        bottom.clamp(0, self.max_scroll())
+    }
+
+    /// The element box for tile `i` with the viewport at `scroll`, or None when
+    /// that tile is scrolled out of sight. This is what the selection fills.
+    pub fn elem(&self, i: i32, scroll: i32) -> Option<Rect> {
+        let (col, row) = (i % self.cols, i / self.cols);
+        let visible = row - scroll;
+        if i < 0 || i >= self.n || visible < 0 || visible >= self.visible_rows {
+            return None;
+        }
+        Some(Rect {
+            x: self.margin + col * (self.elem_w + self.gap),
+            y: self.margin + visible * (self.elem_h + self.gap),
+            w: self.elem_w,
+            h: self.elem_h,
+        })
+    }
+
+    /// The thumbnail box for tile `i`: the top of the element, above the label.
+    pub fn tile(&self, i: i32, scroll: i32) -> Option<Rect> {
+        self.elem(i, scroll).map(|e| Rect {
             x: e.x + self.pad,
             y: e.y + self.pad,
             w: e.w - 2 * self.pad,
             h: self.tile_h,
+        })
+    }
+
+    /// The single line of text under the thumbnail, if labels are drawn.
+    pub fn label(&self, i: i32, scroll: i32) -> Option<Rect> {
+        if !self.labels {
+            return None;
         }
+        self.tile(i, scroll).map(|t| Rect {
+            x: t.x,
+            y: t.y + t.h + self.spacing,
+            w: t.w,
+            h: self.line_h,
+        })
     }
 
     /// The tile at a point in surface-local coordinates, if any. Points in the
     /// gaps between elements and in the window margin belong to nothing, and so
     /// do the empty cells of a ragged last row.
-    pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        let col = self.axis(x, self.margin, self.elem_w, self.cols)?;
-        let row = self.axis(y, self.margin, self.elem_h, self.rows)?;
+    pub fn hit(&self, x: i32, y: i32, scroll: i32) -> Option<usize> {
+        let col = self.axis(x, self.elem_w, self.cols)?;
+        let row = self.axis(y, self.elem_h, self.visible_rows)? + scroll;
         let i = row * self.cols + col;
-        (i < self.n).then_some(i as usize)
+        (i >= 0 && i < self.n).then_some(i as usize)
     }
 
     /// Which cell along one axis a coordinate falls in, or None if it landed in
     /// the margin or a gap.
-    fn axis(&self, v: i32, margin: i32, elem: i32, count: i32) -> Option<i32> {
+    fn axis(&self, v: i32, elem: i32, count: i32) -> Option<i32> {
         let pitch = elem + self.gap;
-        let offset = v - margin;
+        let offset = v - self.margin;
         if offset < 0 {
             return None;
         }
@@ -169,43 +215,37 @@ impl Layout {
         (cell < count && offset % pitch < elem).then_some(cell)
     }
 
-    /// The single line of text under the thumbnail, if labels are drawn.
-    pub fn label(&self, i: i32) -> Option<Rect> {
-        if !self.labels {
+    /// Track and thumb for a scrollbar down the right margin, or None when
+    /// everything already fits.
+    pub fn scrollbar(&self, scroll: i32, width: i32) -> Option<(Rect, Rect)> {
+        if !self.scrollable() {
             return None;
         }
-        let t = self.tile(i);
-        Some(Rect {
-            x: t.x,
-            y: t.y + t.h + self.spacing,
-            w: t.w,
-            h: self.line_h,
-        })
+        let track = Rect {
+            x: self.width - self.margin + (self.margin - width) / 2,
+            y: self.margin,
+            w: width,
+            h: self.height - 2 * self.margin,
+        };
+        let span = (track.h * self.visible_rows / self.rows).max(width);
+        let travel = track.h - span;
+        let thumb = Rect {
+            y: track.y + travel * scroll / self.max_scroll(),
+            h: span,
+            ..track
+        };
+        Some((track, thumb))
     }
 }
 
-/// The largest tile that keeps a `cols`x`rows` grid inside `FILL`% of the
-/// display, never larger than the theme asks for, and at least a pixel. Both
-/// axes shrink by the same factor, so a tile keeps its shape.
-fn fit_grid(
-    t: &Theme,
-    n: i32,
-    cols: i32,
-    rows: i32,
-    label_row: i32,
-    (dw, dh): (i32, i32),
-) -> (i32, i32) {
+/// A tile larger than one row or column of the display has to give way, since
+/// nothing can be shown otherwise. Both axes shrink together, keeping its shape.
+fn shrink_to_one(t: &Theme, label_row: i32, room_w: i32, room_h: i32) -> (i32, i32) {
     let (want_w, want_h) = (t.tile_w.max(1), t.tile_h.max(1));
-    if n == 0 || dw <= 0 || dh <= 0 {
-        return (want_w, want_h);
-    }
-    // Everything in the surface that is not thumbnail.
-    let chrome_w = cols * 2 * t.pad + (cols - 1) * t.gap + 2 * t.margin;
-    let chrome_h = rows * (2 * t.pad + label_row) + (rows - 1) * t.gap + 2 * t.margin;
-    let room_w = (dw * FILL / 100 - chrome_w).max(cols);
-    let room_h = (dh * FILL / 100 - chrome_h).max(rows);
-    let scale = (room_w as f32 / (cols * want_w) as f32)
-        .min(room_h as f32 / (rows * want_h) as f32)
+    let cell_w = want_w + 2 * t.pad;
+    let cell_h = want_h + label_row + 2 * t.pad;
+    let scale = (room_w as f32 / cell_w as f32)
+        .min(room_h as f32 / cell_h as f32)
         .min(1.0);
     (
         ((want_w as f32 * scale) as i32).max(1),
@@ -292,10 +332,10 @@ mod tests {
         for n in 1..=20 {
             let l = Layout::new(&t, n, ROOMY);
             for i in 0..n {
-                let e = l.elem(i);
+                let e = l.elem(i, 0).expect("visible");
                 assert!(e.x >= 0 && e.x + e.w <= l.width, "n = {n}, i = {i}");
                 assert!(e.y >= 0 && e.y + e.h <= l.height, "n = {n}, i = {i}");
-                let tile = l.tile(i);
+                let tile = l.tile(i, 0).expect("visible");
                 assert!(tile.w == t.tile_w && tile.h == t.tile_h);
             }
         }
@@ -309,12 +349,16 @@ mod tests {
         let without = Layout::new(&t, 4, ROOMY);
         let rows = 2;
         assert_eq!(with.height - without.height, rows * (t.spacing + t.line_h));
-        assert!(without.label(0).is_none());
+        assert!(without.label(0, 0).is_none());
 
         let t = Theme::default();
         let l = Layout::new(&t, 4, ROOMY);
         for i in 0..4 {
-            let (tile, label, elem) = (l.tile(i), l.label(i).unwrap(), l.elem(i));
+            let (tile, label, elem) = (
+                l.tile(i, 0).expect("visible"),
+                l.label(i, 0).unwrap(),
+                l.elem(i, 0).expect("visible"),
+            );
             assert_eq!(tile.h, t.tile_h);
             assert_eq!(label.y, tile.y + tile.h + t.spacing);
             assert_eq!(label.w, tile.w);
@@ -324,21 +368,29 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_shrinks_to_fit_a_small_display() {
-        let t = Theme::default();
-        let big = Layout::new(&t, 12, ROOMY);
-        assert_eq!(big.tile(0).w, t.tile_w, "no clamping when there is room");
-
-        // Twenty tiles at full size cannot fit a 1024x768 screen.
-        let small = Layout::new(&t, 20, (1024, 768));
-        assert!(
-            small.width <= 1024 && small.height <= 768,
-            "{small:?} overflows"
+    fn a_tile_too_big_for_one_cell_is_the_only_thing_that_shrinks() {
+        let mut t = Theme::default();
+        let roomy = Layout::new(&t, 12, ROOMY);
+        assert_eq!(
+            roomy.tile(0, 0).expect("visible").w,
+            t.tile_w,
+            "left alone when there is room"
         );
-        assert!(small.tile(0).w < t.tile_w, "tiles should have shrunk");
+
+        // A tile wider and taller than the whole screen has to give way, since
+        // otherwise there is nothing to show.
+        t.tile_w = 2000;
+        t.tile_h = 1500;
+        let l = Layout::new(&t, 4, (800, 600));
+        let tile = l.tile(0, 0).expect("visible");
+        assert!(tile.w < t.tile_w && tile.h < t.tile_h, "should have shrunk");
+        assert!(l.width <= 800 && l.height <= 600, "{l:?}");
+        assert_eq!(l.cols, 1, "only one column can fit");
         // Shrinking keeps the tile's shape.
-        let want = t.tile_w as f32 / t.tile_h as f32;
-        let got = small.tile(0).w as f32 / small.tile(0).h as f32;
+        let (want, got) = (
+            t.tile_w as f32 / t.tile_h as f32,
+            tile.w as f32 / tile.h as f32,
+        );
         assert!(
             (want - got).abs() < 0.05,
             "aspect {got} drifted from {want}"
@@ -348,10 +400,11 @@ mod tests {
     #[test]
     fn a_tiny_display_never_gets_an_oversized_surface() {
         let t = Theme::default();
-        // Thirty windows on a 640x480 screen: the padding and label rows alone
-        // do not fit, so tiles bottom out and the surface is capped instead.
+        // Thirty windows on a 640x480 screen: only a row or two can be shown,
+        // and the rest scroll.
         let l = Layout::new(&t, 30, (640, 480));
-        assert!(l.tile(0).w >= 1 && l.tile(0).h >= 1, "{l:?}");
+        let tile = l.tile(0, 0).expect("visible");
+        assert!(tile.w >= 1 && tile.h >= 1, "{l:?}");
         assert!(l.width <= 640 && l.height <= 480, "{l:?}");
     }
 
@@ -361,32 +414,104 @@ mod tests {
         // 7 tiles over 3 columns: the last row holds one, so two cells are empty.
         let l = Layout::new(&t, 7, ROOMY);
         for i in 0..7 {
-            let e = l.elem(i);
+            let e = l.elem(i, 0).expect("visible");
             for (x, y, what) in [
                 (e.x, e.y, "top left"),
                 (e.x + e.w / 2, e.y + e.h / 2, "centre"),
                 (e.x + e.w - 1, e.y + e.h - 1, "bottom right"),
             ] {
-                assert_eq!(l.hit(x, y), Some(i as usize), "{what} of element {i}");
+                assert_eq!(l.hit(x, y, 0), Some(i as usize), "{what} of element {i}");
             }
         }
         // The window margin, the gap between elements, and the empty cells of
         // the last row all belong to no tile.
-        assert_eq!(l.hit(0, 0), None, "margin");
-        let first = l.elem(0);
+        assert_eq!(l.hit(0, 0, 0), None, "margin");
+        let first = l.elem(0, 0).expect("visible");
         assert_eq!(
-            l.hit(first.x + first.w + 1, first.y),
+            l.hit(first.x + first.w + 1, first.y, 0),
             None,
             "gap between columns"
         );
         assert_eq!(
-            l.hit(first.x, first.y + first.h + 1),
+            l.hit(first.x, first.y + first.h + 1, 0),
             None,
             "gap between rows"
         );
-        let empty = l.elem(8); // row 2, column 2: past the seventh tile
-        assert_eq!(l.hit(empty.x + 4, empty.y + 4), None, "empty cell");
-        assert_eq!(l.hit(-5, -5), None, "outside");
+        // Row 2, column 2 is past the seventh tile: take its column from the top
+        // row and its row from the first column.
+        let col2 = l.elem(2, 0).expect("visible");
+        let row2 = l.elem(6, 0).expect("visible");
+        assert_eq!(l.hit(col2.x + 4, row2.y + 4, 0), None, "empty cell");
+        assert_eq!(l.hit(-5, -5, 0), None, "outside");
+    }
+
+    #[test]
+    fn rows_beyond_the_display_scroll_instead_of_shrinking() {
+        let t = Theme::default();
+        // Thirty tiles cannot fit; the configured tile size must survive anyway.
+        let l = Layout::new(&t, 30, (1280, 1440));
+        assert_eq!(
+            l.tile(0, 0).expect("visible").w,
+            t.tile_w,
+            "tiles kept their size"
+        );
+        assert!(l.scrollable(), "{l:?} should scroll");
+        assert!(l.visible_rows < l.rows);
+        assert!(l.height <= 1440 && l.width <= 1280, "{l:?}");
+
+        // The viewport shows a window of rows, and nothing outside it.
+        let per_screen = (l.visible_rows * l.cols) as usize;
+        assert!(l.elem(0, 0).is_some());
+        assert!(
+            l.elem(per_screen as i32, 0).is_none(),
+            "first row below the fold"
+        );
+        assert!(
+            l.elem(per_screen as i32, 1).is_some(),
+            "and visible once scrolled"
+        );
+    }
+
+    #[test]
+    fn revealing_moves_the_viewport_as_little_as_possible() {
+        let t = Theme::default();
+        let l = Layout::new(&t, 30, (1280, 1440));
+        let last_visible = (l.visible_rows * l.cols - 1) as usize;
+        assert_eq!(l.reveal(0, 0), 0, "already on screen");
+        assert_eq!(l.reveal(last_visible, 0), 0, "still on screen");
+        // One row further down scrolls by exactly one row.
+        assert_eq!(l.reveal(last_visible + 1, 0), 1);
+        // Jumping to the end goes as far as it can, and no further.
+        assert_eq!(l.reveal(29, 0), l.max_scroll());
+        // Coming back up scrolls the other way.
+        assert_eq!(l.reveal(0, l.max_scroll()), 0);
+    }
+
+    #[test]
+    fn hit_testing_follows_the_scroll() {
+        let t = Theme::default();
+        let l = Layout::new(&t, 30, (1280, 1440));
+        let first = l.elem(0, 0).expect("visible");
+        let probe = (first.x + first.w / 2, first.y + first.h / 2);
+        assert_eq!(l.hit(probe.0, probe.1, 0), Some(0));
+        // The same pixel is a different tile once the grid has scrolled.
+        assert_eq!(l.hit(probe.0, probe.1, 1), Some(l.cols as usize));
+    }
+
+    #[test]
+    fn a_scrollbar_appears_only_when_there_is_more_to_see() {
+        let t = Theme::default();
+        assert!(Layout::new(&t, 4, ROOMY).scrollbar(0, 4).is_none());
+        let l = Layout::new(&t, 30, (1280, 1440));
+        let (track, top) = l.scrollbar(0, 4).expect("scrollable");
+        assert_eq!(top.y, track.y, "thumb starts at the top");
+        assert!(top.h < track.h, "thumb is shorter than its track");
+        let (_, bottom) = l.scrollbar(l.max_scroll(), 4).expect("scrollable");
+        assert_eq!(
+            bottom.y + bottom.h,
+            track.y + track.h,
+            "and ends at the bottom"
+        );
     }
 
     #[test]

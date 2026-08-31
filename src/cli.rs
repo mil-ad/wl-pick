@@ -29,8 +29,8 @@ usage: wl-pick [options]
   -v, --verbose             phase timings, tile list and capture stats
   -h, --help                this
 
-keys:  arrows, hjkl or Tab/Shift+Tab move; Home/End jump; Enter picks;
-       Escape or q cancels
+keys:  arrows, hjkl or Tab/Shift+Tab move; PgUp/PgDn and Home/End jump;
+       Enter picks; Escape or q cancels
 mouse: click a tile to pick it, scroll to move. Hovering does not move the
        selection, and a click outside a tile does nothing.
 
@@ -51,9 +51,9 @@ config:
     border         = #d79921
     border-width   = 2px
 
-    tile-width     = 18ppt        # largest a thumbnail may be
+    tile-width     = 18ppt        # how big a thumbnail is
     tile-height    = 20ppt        # defaults to the display's aspect
-    max-columns    = 4
+    max-columns    = 4            # rows beyond the screen scroll
 
     font           = monospace    # also --font
     font-size      = 13.3
