@@ -25,6 +25,9 @@ pub struct Theme {
     /// Margin between the grid and the window edge.
     pub margin: i32,
     pub max_cols: i32,
+    /// Cap on rows shown at once. Without it the viewport is as tall as the
+    /// display allows; with it the grid stays compact and scrolls sooner.
+    pub max_rows: Option<i32>,
     /// Gap between a thumbnail and its label (rasi `element { spacing }`).
     pub spacing: i32,
     /// Label font family, resolved against the system's fonts. The default is
@@ -53,6 +56,7 @@ impl Default for Theme {
             gap: 15,
             margin: 12,
             max_cols: 4,
+            max_rows: None,
             spacing: 10,
             font: crate::text::SYSTEM_MONO.to_string(),
             font_px: 13.3,
@@ -111,7 +115,8 @@ impl Layout {
         let fit_cols = ((room_w + t.gap) / (elem_w + t.gap)).max(1);
         cols = cols.clamp(1, t.max_cols.min(fit_cols)).max(1);
         let rows = (n + cols - 1) / cols;
-        let visible_rows = ((room_h + t.gap) / (elem_h + t.gap)).clamp(1, rows.max(1));
+        let fits = (room_h + t.gap) / (elem_h + t.gap);
+        let visible_rows = fits.min(t.max_rows.unwrap_or(fits)).clamp(1, rows.max(1));
 
         Self {
             cols,
@@ -470,6 +475,26 @@ mod tests {
             l.elem(per_screen as i32, 1).is_some(),
             "and visible once scrolled"
         );
+    }
+
+    #[test]
+    fn max_rows_keeps_the_grid_compact() {
+        let mut t = Theme::default();
+        let full = Layout::new(&t, 30, (1280, 1440));
+        t.max_rows = Some(2);
+        let capped = Layout::new(&t, 30, (1280, 1440));
+        assert!(
+            capped.visible_rows == 2 && full.visible_rows > 2,
+            "{capped:?}"
+        );
+        assert!(capped.height < full.height, "a shorter overlay");
+        assert!(capped.scrollable());
+        // The cap cannot invent rows: four tiles make a 2x2 grid, and a cap of
+        // five leaves it alone.
+        t.max_rows = Some(5);
+        let few = Layout::new(&t, 4, (1280, 1440));
+        assert_eq!((few.cols, few.rows, few.visible_rows), (2, 2, 2), "{few:?}");
+        assert!(!few.scrollable());
     }
 
     #[test]

@@ -53,7 +53,9 @@ config:
 
     tile-width     = 18ppt        # how big a thumbnail is
     tile-height    = 20ppt        # defaults to the display's aspect
-    max-columns    = 4            # rows beyond the screen scroll
+    max-columns    = 4
+    max-rows       = 3            # default: as many as the display fits;
+                                  # rows beyond that scroll
 
     font           = monospace    # also --font
     font-size      = 13.3
@@ -159,6 +161,7 @@ impl Args {
             tile_w: tile_w.max(1),
             tile_h: tile_h.max(1),
             max_cols: cfg.max_columns.unwrap_or(base.max_cols).max(1),
+            max_rows: cfg.max_rows.map(|r| r.max(1)).or(base.max_rows),
             labels: self.labels.or(cfg.labels).unwrap_or(base.labels),
             font: self
                 .font

@@ -153,6 +153,7 @@ border-width   = 2px
 tile-width     = 18ppt        # largest a thumbnail may be
 tile-height    = 20ppt        # defaults to the display's aspect
 max-columns    = 4
+max-rows       = 3            # default: however many the display fits
 
 font           = monospace
 font-size      = 13.3
@@ -175,8 +176,13 @@ the width and the height follows the display's aspect, which is roughly the shap
 of the windows on it — a 16:9 cell wastes about half its area on a portrait
 monitor.
 
-When there are more rows than the display can show, **the grid scrolls**: the
-tile size you asked for is honoured and a scrollbar appears in the right margin.
+Nothing sets the overlay's height directly: it is as many rows as fit in 90% of
+the display, so below that threshold the window hugs the grid. `max-rows` caps it
+if you would rather have a compact strip that scrolls sooner than a full-height
+overlay — the symmetric partner to `max-columns`.
+
+When there are more rows than can be shown, **the grid scrolls**: the tile size
+you asked for is honoured and a scrollbar appears in the right margin.
 Any move keeps the selection in view, `PgUp`/`PgDn` jump a screen, and tiles
 scrolled out of sight are unmapped — so live capture skips them too, which is
 what stops a long list costing bandwidth for pixels nobody sees. Only a tile too

@@ -88,6 +88,7 @@ pub struct Config {
     pub tile_width: Option<Length>,
     pub tile_height: Option<Length>,
     pub max_columns: Option<i32>,
+    pub max_rows: Option<i32>,
     pub font: Option<String>,
     pub font_size: Option<f32>,
     pub labels: Option<bool>,
@@ -140,9 +141,8 @@ impl Config {
             "border-width" => self.border_width = Some(Length::parse(value)?),
             "tile-width" => self.tile_width = Some(Length::parse(value)?),
             "tile-height" => self.tile_height = Some(Length::parse(value)?),
-            "max-columns" => {
-                self.max_columns = Some(number(value)?);
-            }
+            "max-columns" => self.max_columns = Some(number(value)?),
+            "max-rows" => self.max_rows = Some(number(value)?),
             "font" => self.font = Some(value.to_string()),
             "font-size" => self.font_size = Some(number(value)?),
             "labels" => self.labels = Some(boolean(value)?),
@@ -230,6 +230,7 @@ border-width = 2px
 
 tile-width = 18ppt
 max-columns = 4
+max-rows = 3
 
 live = current
 fps = 30
@@ -242,6 +243,7 @@ labels = no
         assert_eq!(cfg.border_width, Some(Length::Px(2)));
         assert_eq!(cfg.tile_width, Some(Length::Ppt(18.0)));
         assert_eq!(cfg.max_columns, Some(4));
+        assert_eq!(cfg.max_rows, Some(3));
         assert_eq!(cfg.fps, Some(30));
         assert_eq!(cfg.labels, Some(false));
         assert!(cfg.live.is_some());
