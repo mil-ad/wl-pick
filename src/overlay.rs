@@ -66,9 +66,16 @@ impl App {
     pub fn show(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
         let (lw, lh) = (self.layout.width, self.layout.height);
         let surface = self.compositor.create_surface(qh, ());
+        // Map on the display the layout was sized against, not wherever the
+        // compositor would otherwise put it.
+        let output = self
+            .outputs
+            .iter()
+            .find(|(_, name)| *name == self.output)
+            .map(|(output, _)| output);
         let layer = self.layer_shell.get_layer_surface(
             &surface,
-            None, // let the compositor place it on the active output
+            output,
             Layer::Overlay,
             "wl-pick".to_string(),
             qh,

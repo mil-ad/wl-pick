@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// How a pick is written to stdout.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     /// Tab-separated columns, for `IFS=$'\t' read` or cut(1).
     Tsv,
@@ -17,7 +17,18 @@ pub enum Format {
     Portal,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl Format {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "tsv" => Ok(Format::Tsv),
+            "json" => Ok(Format::Json),
+            "portal" => Ok(Format::Portal),
+            other => Err(format!("{other:?} is not tsv, json or portal")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Window,
     Output,

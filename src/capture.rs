@@ -33,7 +33,7 @@ use crate::shm;
 use crate::target::{Kind, Target};
 
 /// Which tiles keep updating after the first frame.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Live {
     /// Every tile.
     All,
@@ -41,6 +41,17 @@ pub enum Live {
     Current,
     /// Nothing: one snapshot each, a picker rather than an expose.
     None,
+}
+
+impl Live {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "all" => Ok(Live::All),
+            "current" => Ok(Live::Current),
+            "none" => Ok(Live::None),
+            other => Err(format!("{other:?} is not all, current or none")),
+        }
+    }
 }
 
 /// One capture buffer. `busy` means the compositor still holds it — either it is

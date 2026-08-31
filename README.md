@@ -48,6 +48,7 @@ wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
 - `--hide-labels` draws an icon-only grid
 - `--font FAMILY` label font family (default: the system monospace font)
 - `--font-size PX` label size in logical px
+- `--config PATH` config file (default `~/.config/wl-pick/config`)
 - `--timeout SECS` exits after a deadline, in case the keyboard grab ever traps
   you
 - `--verbose` phase timings, the tile list, and capture stats
@@ -135,13 +136,53 @@ of shm for eight windows and a display here, against 83 MB with `--live none`)
 and a readback per refreshed frame. `--live current` refreshes only the selected tile,
 which is much cheaper and still reads as alive.
 
+## Config
+
+`~/.config/wl-pick/config`, or `--config PATH`. Flat `key = value` lines with
+`#` comments, everything optional, and a flag always beats the file. No TOML
+dependency, because there is nothing to nest.
+
+```ini
+background     = #282828      # the grid's backdrop
+foreground     = #ebdbb2      # label text
+selection      = #d79921      # the highlighted tile
+selection-text = #282828      # its label
+border         = #d79921
+border-width   = 2px
+
+tile-width     = 18ppt        # largest a thumbnail may be
+tile-height    = 20ppt        # defaults to the display's aspect
+max-columns    = 4
+
+font           = monospace
+font-size      = 13.3
+labels         = yes
+outputs        = yes
+live           = all
+fps            = 12
+format         = tsv
+```
+
+Sizes take sway's units: `600px` is absolute, `70ppt` a percentage — and the
+percentage resolves against **the display the grid actually appears on**, every
+time it runs. On a mixed setup one file gives 18% of a 1280-wide laptop panel and
+18% of a 3840-wide monitor, instead of a pixel count that suits one and looks
+wrong on the other. The overlay is mapped explicitly on that display, at that
+display's scale, so mixed-DPI renders crisply either way.
+
+`tile-width` and `tile-height` are maxima for the thumbnail cell. Give only the
+width and the height follows the display's aspect, which is roughly the shape of
+the windows on it — a 16:9 cell wastes about half its area on a portrait monitor.
+If the grid would outgrow the display, tiles shrink together and keep their
+shape, so thirty windows give small tiles rather than a surface larger than the
+screen.
+
 ## Look
 
-Colours, font metrics and grid geometry come from the rofi theme this replaces
-(gruvbox dark, a yellow selection filling the element padding, `ceil(sqrt(n))`
-columns capped at 4, 16:9 tiles, `title · app` centred underneath) and live in
-`src/theme.rs`, which is the one place to change them. They are not
-configurable at runtime beyond the font flags.
+The defaults come from the rofi theme this replaces: gruvbox dark, a yellow
+selection filling the element padding, `ceil(sqrt(n))` columns capped at 4,
+`title · app` centred underneath. Padding, gaps and margins are still fixed, in
+`src/theme.rs`.
 
 The label font defaults to the system monospace font — whatever `fc-match
 monospace` answers, which is what the rest of the desktop uses. (cosmic-text's

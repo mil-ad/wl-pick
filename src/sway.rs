@@ -38,26 +38,43 @@ fn collect(node: &Node, out: &mut Vec<Target>) {
     }
 }
 
-/// The active displays, and the scale the overlay should render at: the largest
-/// in use, rounded up, since a buffer can be downscaled but not invented.
-pub struct Displays {
-    pub(crate) names: Vec<String>,
-    pub(crate) scale: i32,
+/// One active display: what the overlay needs to size itself against.
+///
+/// The overlay maps on the focused display, so percentages and the buffer scale
+/// are resolved against *that* one — on a mixed-DPI, mixed-size setup the
+/// numbers differ per monitor, and taking the largest of everything would be
+/// wrong on all but one.
+#[derive(Clone, Debug)]
+pub struct Display {
+    pub name: String,
+    /// Logical size, which is what layer-shell and pointer events speak in.
+    pub width: i32,
+    pub height: i32,
+    /// Integer scale to render at: a buffer can be downscaled, not invented.
+    pub scale: i32,
+    pub focused: bool,
 }
 
-pub fn displays(conn: &mut Connection) -> Result<Displays, swayipc::Error> {
-    let active: Vec<_> = conn
+pub fn displays(conn: &mut Connection) -> Result<Vec<Display>, swayipc::Error> {
+    Ok(conn
         .get_outputs()?
         .into_iter()
         .filter(|o| o.active)
-        .collect();
-    Ok(Displays {
-        scale: active
-            .iter()
-            .map(|o| o.scale.unwrap_or(1.0).ceil() as i32)
-            .max()
-            .unwrap_or(1)
-            .max(1),
-        names: active.into_iter().map(|o| o.name).collect(),
-    })
+        .map(|o| Display {
+            name: o.name,
+            width: o.rect.width,
+            height: o.rect.height,
+            scale: (o.scale.unwrap_or(1.0).ceil() as i32).max(1),
+            focused: o.focused,
+        })
+        .collect())
+}
+
+/// The display the overlay will appear on: the focused one, or any active one if
+/// sway reports none focused.
+pub fn focused(displays: &[Display]) -> Option<&Display> {
+    displays
+        .iter()
+        .find(|d| d.focused)
+        .or_else(|| displays.first())
 }

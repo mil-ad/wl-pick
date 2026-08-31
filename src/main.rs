@@ -26,6 +26,7 @@
 mod app;
 mod capture;
 mod cli;
+mod config;
 mod overlay;
 mod shm;
 mod sway;
@@ -41,7 +42,7 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::{Connection, EventQueue};
 
 use app::App;
-use cli::Args;
+use config::Config;
 use target::Target;
 use theme::Layout;
 
@@ -57,23 +58,44 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, Box<dyn Error>> {
     let args = cli::parse_args().map_err(|e| -> Box<dyn Error> { e.into() })?;
-    args.arm_timeout();
+    let config =
+        Config::load(args.config.as_deref()).map_err(|e| -> Box<dyn Error> { e.into() })?;
 
     let start = Instant::now();
     let mut phases = Phases::new(args.verbose);
-    let (targets, scale) = list(&args)?;
+    // One IPC conversation: the window list, and the displays the grid sizes
+    // itself against. It is closed again before the overlay maps.
+    let (targets, opts) = {
+        let mut sway = swayipc::Connection::new().map_err(|e| {
+            format!("cannot reach sway ({e}); wl-pick reads the window list from its IPC socket")
+        })?;
+        // The displays come first: the grid is sized against the one it will
+        // appear on, so every percentage in the config resolves per monitor.
+        let displays = sway::displays(&mut sway)?;
+        let display = sway::focused(&displays).ok_or("sway reports no active display")?;
+        let opts = args.resolve(&config, display);
+        let mut targets = sway::windows(&mut sway)?;
+        if opts.outputs {
+            // Displays go last, after the windows, so window positions are
+            // stable as windows come and go.
+            targets.extend(displays.iter().map(|d| Target::output(d.name.clone())));
+        }
+        (targets, opts)
+    };
     if targets.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
     phases.mark("sway-tree");
 
-    let settings = args.settings(scale);
+    cli::arm_timeout(opts.timeout);
+    let settings = opts.settings;
     let theme = &settings.theme;
+    let scale = settings.scale;
     // Start shaping labels now: it costs ~55ms of font loading and glyph
     // rasterising, and the captures below are ~55ms of waiting on the
     // compositor, so the two overlap almost exactly.
     let labels = theme.labels.then(|| {
-        let layout = Layout::new(theme, targets.len() as i32);
+        let layout = Layout::new(theme, targets.len() as i32, settings.display);
         text::spawn(
             targets.iter().map(Target::label).collect(),
             theme.font.clone(),
@@ -105,7 +127,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         app.labels = Some(job.join().map_err(|_| "label thread panicked")?);
     }
     phases.mark("labels");
-    if args.verbose {
+    if opts.verbose {
         app.describe();
     }
 
@@ -118,14 +140,14 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     phases.mark("mapped");
 
     pump(&mut queue, &mut app, |a| a.finished())?;
-    if args.verbose {
+    if opts.verbose {
         app.report(start.elapsed());
     }
 
     let Some(target) = app.picked() else {
         return Ok(ExitCode::FAILURE); // cancelled: nothing on stdout
     };
-    match target.render(args.format) {
+    match target.render(opts.format) {
         Some(line) => println!("{line}"),
         // Only the portal format can fail to name something: it identifies a
         // window by its foreign-toplevel identifier, and this one has none.
@@ -135,19 +157,6 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// Everything the grid can show, windows first so their positions stay stable as
-/// displays come and go. The IPC connection is only needed for this, and is
-/// closed again before the overlay maps.
-fn list(args: &Args) -> Result<(Vec<Target>, i32), Box<dyn Error>> {
-    let mut sway = swayipc::Connection::new()?;
-    let mut targets = sway::windows(&mut sway)?;
-    let displays = sway::displays(&mut sway)?;
-    if args.outputs {
-        targets.extend(displays.names.iter().cloned().map(Target::output));
-    }
-    Ok((targets, displays.scale))
 }
 
 /// Run the event loop until `done`.

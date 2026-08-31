@@ -56,8 +56,13 @@ pub struct Settings {
     pub theme: Theme,
     pub live: Live,
     pub fps: u32,
-    /// Integer output scale the overlay renders at.
+    /// Integer scale of the display the overlay renders on.
     pub scale: i32,
+    /// That display's logical size, which the grid is fitted into.
+    pub display: (i32, i32),
+    /// And its name, so the overlay maps there rather than wherever the
+    /// compositor would have put it.
+    pub output: String,
 }
 
 pub struct App {
@@ -100,6 +105,9 @@ pub struct App {
     pub(crate) chrome: Option<shm::Chrome>,
     pub(crate) chrome_buffers: Vec<WlBuffer>,
     pub(crate) configured: bool,
+
+    /// The display the overlay maps on, by name.
+    pub(crate) output: String,
 
     pub(crate) ending: Ending,
     pub(crate) picked: Option<Target>,
@@ -152,8 +160,10 @@ impl App {
             live,
             fps,
             scale,
+            display,
+            output,
         } = settings;
-        let layout = Layout::new(&theme, targets.len() as i32);
+        let layout = Layout::new(&theme, targets.len() as i32, display);
         // Bind everything up front so a compositor missing a protocol fails
         // here, with a name, rather than halfway through a capture.
         let mut app = Self {
@@ -185,6 +195,7 @@ impl App {
             chrome: None,
             chrome_buffers: Vec::new(),
             configured: false,
+            output,
             ending: Ending::Running,
             picked: None,
             stats: Stats::default(),

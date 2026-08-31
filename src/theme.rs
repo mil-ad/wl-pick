@@ -7,11 +7,9 @@ pub type Argb = u32;
 
 pub struct Theme {
     pub bg: Argb,
-    /// Label colours; used once tiles are labelled.
-    #[allow(dead_code)]
+    /// Label colours.
     pub fg: Argb,
     pub sel_bg: Argb,
-    #[allow(dead_code)]
     pub sel_fg: Argb,
     pub border: Argb,
     /// Window border, logical px (rasi `border: 0.18em` at 12pt ~ 2px).
@@ -65,6 +63,7 @@ impl Default for Theme {
 }
 
 /// Where every element and thumbnail goes, in logical px.
+#[derive(Debug)]
 pub struct Layout {
     pub cols: i32,
     pub rows: i32,
@@ -83,10 +82,18 @@ pub struct Layout {
     labels: bool,
 }
 
+/// How much of the display the grid may occupy before tiles start shrinking.
+const FILL: i32 = 90;
+
 impl Layout {
     /// A balanced grid: ceil(sqrt(n)) columns, capped, so the last row isn't
     /// ragged (6 windows -> 3x2, not 4x2 with two holes). Same rule rofigrid uses.
-    pub fn new(t: &Theme, n: i32) -> Self {
+    ///
+    /// `display` is the logical size of the screen this will appear on. Tiles are
+    /// the size the theme asks for until the grid would outgrow the screen, at
+    /// which point they shrink together — keeping their aspect — so thirty
+    /// windows give small tiles rather than a surface larger than the monitor.
+    pub fn new(t: &Theme, n: i32, display: (i32, i32)) -> Self {
         let mut cols = (n as f64).sqrt() as i32;
         if cols * cols < n {
             cols += 1;
@@ -95,19 +102,23 @@ impl Layout {
         let rows = (n + cols - 1) / cols;
         // An element is the thumbnail, optionally a label under it, and padding.
         let label_row = if t.labels { t.spacing + t.line_h } else { 0 };
-        let (elem_w, elem_h) = (t.tile_w + 2 * t.pad, t.tile_h + label_row + 2 * t.pad);
+        let (tile_w, tile_h) = fit_grid(t, n, cols, rows, label_row, display);
+        let (elem_w, elem_h) = (tile_w + 2 * t.pad, tile_h + label_row + 2 * t.pad);
         Self {
             cols,
             rows,
             n,
-            width: cols * elem_w + (cols - 1) * t.gap + 2 * t.margin,
-            height: rows * elem_h + (rows - 1) * t.gap + 2 * t.margin,
+            // Padding, gaps and label rows can outgrow a small display all by
+            // themselves, so the surface is capped: better a clipped last row
+            // than asking for a window larger than the screen showing it.
+            width: (cols * elem_w + (cols - 1) * t.gap + 2 * t.margin).min(display.0.max(1)),
+            height: (rows * elem_h + (rows - 1) * t.gap + 2 * t.margin).min(display.1.max(1)),
             elem_w,
             elem_h,
             margin: t.margin,
             gap: t.gap,
             pad: t.pad,
-            tile_h: t.tile_h,
+            tile_h,
             spacing: t.spacing,
             line_h: t.line_h,
             labels: t.labels,
@@ -173,6 +184,35 @@ impl Layout {
     }
 }
 
+/// The largest tile that keeps a `cols`x`rows` grid inside `FILL`% of the
+/// display, never larger than the theme asks for, and at least a pixel. Both
+/// axes shrink by the same factor, so a tile keeps its shape.
+fn fit_grid(
+    t: &Theme,
+    n: i32,
+    cols: i32,
+    rows: i32,
+    label_row: i32,
+    (dw, dh): (i32, i32),
+) -> (i32, i32) {
+    let (want_w, want_h) = (t.tile_w.max(1), t.tile_h.max(1));
+    if n == 0 || dw <= 0 || dh <= 0 {
+        return (want_w, want_h);
+    }
+    // Everything in the surface that is not thumbnail.
+    let chrome_w = cols * 2 * t.pad + (cols - 1) * t.gap + 2 * t.margin;
+    let chrome_h = rows * (2 * t.pad + label_row) + (rows - 1) * t.gap + 2 * t.margin;
+    let room_w = (dw * FILL / 100 - chrome_w).max(cols);
+    let room_h = (dh * FILL / 100 - chrome_h).max(rows);
+    let scale = (room_w as f32 / (cols * want_w) as f32)
+        .min(room_h as f32 / (rows * want_h) as f32)
+        .min(1.0);
+    (
+        ((want_w as f32 * scale) as i32).max(1),
+        ((want_h as f32 * scale) as i32).max(1),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub x: i32,
@@ -218,6 +258,10 @@ pub fn fit_centred(w: i32, h: i32, box_: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    /// A display large enough that nothing is clamped, so the geometry tests
+    /// keep testing geometry.
+    const ROOMY: (i32, i32) = (10_000, 10_000);
+
     /// The grid maths must match rofigrid's, or the window stops hugging the grid.
     #[test]
     fn grid_matches_rofigrid() {
@@ -231,7 +275,7 @@ mod tests {
             (12, 4, 3),
             (17, 4, 5),
         ] {
-            let l = Layout::new(&t, n);
+            let l = Layout::new(&t, n, ROOMY);
             assert_eq!((l.cols, l.rows), (cols, rows), "n = {n}");
             // rofigrid: win_w = cols*(ICON+24) + (cols-1)*15 + 24
             assert_eq!(
@@ -246,7 +290,7 @@ mod tests {
     fn elements_stay_inside_the_window() {
         let t = Theme::default();
         for n in 1..=20 {
-            let l = Layout::new(&t, n);
+            let l = Layout::new(&t, n, ROOMY);
             for i in 0..n {
                 let e = l.elem(i);
                 assert!(e.x >= 0 && e.x + e.w <= l.width, "n = {n}, i = {i}");
@@ -260,15 +304,15 @@ mod tests {
     #[test]
     fn labels_add_a_row_under_each_thumbnail() {
         let mut t = Theme::default();
-        let with = Layout::new(&t, 4);
+        let with = Layout::new(&t, 4, ROOMY);
         t.labels = false;
-        let without = Layout::new(&t, 4);
+        let without = Layout::new(&t, 4, ROOMY);
         let rows = 2;
         assert_eq!(with.height - without.height, rows * (t.spacing + t.line_h));
         assert!(without.label(0).is_none());
 
         let t = Theme::default();
-        let l = Layout::new(&t, 4);
+        let l = Layout::new(&t, 4, ROOMY);
         for i in 0..4 {
             let (tile, label, elem) = (l.tile(i), l.label(i).unwrap(), l.elem(i));
             assert_eq!(tile.h, t.tile_h);
@@ -280,10 +324,42 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_shrinks_to_fit_a_small_display() {
+        let t = Theme::default();
+        let big = Layout::new(&t, 12, ROOMY);
+        assert_eq!(big.tile(0).w, t.tile_w, "no clamping when there is room");
+
+        // Twenty tiles at full size cannot fit a 1024x768 screen.
+        let small = Layout::new(&t, 20, (1024, 768));
+        assert!(
+            small.width <= 1024 && small.height <= 768,
+            "{small:?} overflows"
+        );
+        assert!(small.tile(0).w < t.tile_w, "tiles should have shrunk");
+        // Shrinking keeps the tile's shape.
+        let want = t.tile_w as f32 / t.tile_h as f32;
+        let got = small.tile(0).w as f32 / small.tile(0).h as f32;
+        assert!(
+            (want - got).abs() < 0.05,
+            "aspect {got} drifted from {want}"
+        );
+    }
+
+    #[test]
+    fn a_tiny_display_never_gets_an_oversized_surface() {
+        let t = Theme::default();
+        // Thirty windows on a 640x480 screen: the padding and label rows alone
+        // do not fit, so tiles bottom out and the surface is capped instead.
+        let l = Layout::new(&t, 30, (640, 480));
+        assert!(l.tile(0).w >= 1 && l.tile(0).h >= 1, "{l:?}");
+        assert!(l.width <= 640 && l.height <= 480, "{l:?}");
+    }
+
+    #[test]
     fn hit_testing_is_the_inverse_of_the_layout() {
         let t = Theme::default();
         // 7 tiles over 3 columns: the last row holds one, so two cells are empty.
-        let l = Layout::new(&t, 7);
+        let l = Layout::new(&t, 7, ROOMY);
         for i in 0..7 {
             let e = l.elem(i);
             for (x, y, what) in [
