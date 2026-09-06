@@ -83,10 +83,11 @@ pub struct Config {
     pub selection_text: Option<Argb>,
     pub border: Option<Argb>,
     pub border_width: Option<Length>,
-    /// Largest a thumbnail may be. Height defaults to the display's aspect, so
-    /// a tile is shaped like the windows it shows.
-    pub tile_width: Option<Length>,
-    pub tile_height: Option<Length>,
+    /// The box the grid may not exceed. Thumbnails are this divided by the
+    /// column and row caps, so their size does not depend on how many windows
+    /// happen to be open.
+    pub max_width: Option<Length>,
+    pub max_height: Option<Length>,
     pub max_columns: Option<i32>,
     pub max_rows: Option<i32>,
     pub font: Option<String>,
@@ -139,8 +140,8 @@ impl Config {
             "selection-text" => self.selection_text = Some(colour(value)?),
             "border" => self.border = Some(colour(value)?),
             "border-width" => self.border_width = Some(Length::parse(value)?),
-            "tile-width" => self.tile_width = Some(Length::parse(value)?),
-            "tile-height" => self.tile_height = Some(Length::parse(value)?),
+            "max-width" => self.max_width = Some(Length::parse(value)?),
+            "max-height" => self.max_height = Some(Length::parse(value)?),
             "max-columns" => self.max_columns = Some(number(value)?),
             "max-rows" => self.max_rows = Some(number(value)?),
             "font" => self.font = Some(value.to_string()),
@@ -228,7 +229,7 @@ background = #282828
 selection  = #d79921   # trailing comment
 border-width = 2px
 
-tile-width = 18ppt
+max-width = 70ppt
 max-columns = 4
 max-rows = 3
 
@@ -241,7 +242,7 @@ labels = no
         assert_eq!(cfg.background, Some(0xff282828));
         assert_eq!(cfg.selection, Some(0xffd79921));
         assert_eq!(cfg.border_width, Some(Length::Px(2)));
-        assert_eq!(cfg.tile_width, Some(Length::Ppt(18.0)));
+        assert_eq!(cfg.max_width, Some(Length::Ppt(70.0)));
         assert_eq!(cfg.max_columns, Some(4));
         assert_eq!(cfg.max_rows, Some(3));
         assert_eq!(cfg.fps, Some(30));
@@ -249,7 +250,7 @@ labels = no
         assert!(cfg.live.is_some());
         // Untouched settings stay unset, so defaults survive.
         assert_eq!(cfg.foreground, None);
-        assert_eq!(cfg.tile_height, None);
+        assert_eq!(cfg.max_height, None);
     }
 
     #[test]

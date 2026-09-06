@@ -150,10 +150,10 @@ selection-text = #282828      # its label
 border         = #d79921
 border-width   = 2px
 
-tile-width     = 18ppt        # largest a thumbnail may be
-tile-height    = 20ppt        # defaults to the display's aspect
-max-columns    = 4
-max-rows       = 3            # default: however many the display fits
+max-width      = 90ppt        # the box the grid may fill
+max-height     = 90ppt
+max-columns    = 4            # thumbnails are that box divided by these
+max-rows       = 4
 
 font           = monospace
 font-size      = 13.3
@@ -164,30 +164,27 @@ fps            = 12
 format         = tsv
 ```
 
-Sizes take sway's units: `600px` is absolute, `70ppt` a percentage — and the
+Sizes take sway's units: `600px` is absolute, `90ppt` a percentage — and the
 percentage resolves against **the display the grid actually appears on**, every
-time it runs. On a mixed setup one file gives 18% of a 1280-wide laptop panel and
-18% of a 3840-wide monitor, instead of a pixel count that suits one and looks
-wrong on the other. The overlay is mapped explicitly on that display, at that
-display's scale, so mixed-DPI renders crisply either way.
+time it runs. On a mixed setup one file gives 90% of a 1280-wide laptop panel and
+90% of a 3840-wide monitor, rather than a pixel count that suits one and looks
+wrong on the other. The overlay maps explicitly on that display, at its scale, so
+mixed-DPI renders crisply either way.
 
-`tile-width` and `tile-height` set how big a thumbnail actually is. Give only
-the width and the height follows the display's aspect, which is roughly the shape
-of the windows on it — a 16:9 cell wastes about half its area on a portrait
-monitor.
+All four sizing settings are **caps**:
 
-Nothing sets the overlay's height directly: it is as many rows as fit in 90% of
-the display, so below that threshold the window hugs the grid. `max-rows` caps it
-if you would rather have a compact strip that scrolls sooner than a full-height
-overlay — the symmetric partner to `max-columns`.
+- `max-width` and `max-height` bound the overlay.
+- `max-columns` and `max-rows` bound the grid inside it.
 
-When there are more rows than can be shown, **the grid scrolls**: the tile size
-you asked for is honoured and a scrollbar appears in the right margin.
-Any move keeps the selection in view, `PgUp`/`PgDn` jump a screen, and tiles
-scrolled out of sight are unmapped — so live capture skips them too, which is
-what stops a long list costing bandwidth for pixels nobody sees. Only a tile too
-large for even one row or column is shrunk, since then nothing could be shown at
-all.
+A thumbnail is simply that box divided by those caps, which means **its size
+never depends on how many windows are open**: one window gets the same
+thumbnail as thirty, in a smaller overlay, because the overlay hugs whatever is
+actually there. Rows past `max-rows` scroll, with a scrollbar in the right
+margin, `PgUp`/`PgDn`, and the selection always kept in view. Tiles scrolled out
+of sight are unmapped, so live capture skips them too.
+
+Turning labels off gives that row back to the thumbnails rather than shrinking
+the window, since the box is what you asked for either way.
 
 ## Look
 

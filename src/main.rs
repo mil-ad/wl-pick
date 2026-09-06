@@ -101,7 +101,9 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             theme.font.clone(),
             theme.font_px * scale as f32,
             (theme.line_h * scale) as f32,
-            (layout.label(0, 0).map(|r| r.w).unwrap_or(theme.tile_w) * scale) as f32,
+            // The label box is a tile wide; with no tiles there is nothing to
+            // shape anyway.
+            (layout.label(0, 0).map(|r| r.w).unwrap_or(1) * scale) as f32,
         )
     });
 

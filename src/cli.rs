@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::app::Settings;
 use crate::capture::Live;
-use crate::config::Config;
+use crate::config::{Config, Length};
 use crate::sway::Display;
 use crate::target::Format;
 use crate::theme::Theme;
@@ -51,11 +51,11 @@ config:
     border         = #d79921
     border-width   = 2px
 
-    tile-width     = 18ppt        # how big a thumbnail is
-    tile-height    = 20ppt        # defaults to the display's aspect
-    max-columns    = 4
-    max-rows       = 3            # default: as many as the display fits;
-                                  # rows beyond that scroll
+    max-width      = 90ppt        # the box the grid may fill
+    max-height     = 90ppt
+    max-columns    = 4            # thumbnails are the box divided by these,
+    max-rows       = 4            # so their size never depends on how many
+                                  # windows are open; further rows scroll
 
     font           = monospace    # also --font
     font-size      = 13.3
@@ -140,15 +140,16 @@ impl Args {
     pub fn resolve(&self, cfg: &Config, display: &Display) -> Options {
         let base = Theme::default();
         let font_px = self.font_size.or(cfg.font_size).unwrap_or(base.font_px);
-        let tile_w = cfg
-            .tile_width
-            .map_or(base.tile_w, |l| l.resolve(display.width));
-        // A tile is shaped like the display unless told otherwise, since that is
-        // roughly the shape of the windows on it.
-        let tile_h = cfg.tile_height.map_or_else(
-            || (tile_w as f32 * display.height as f32 / display.width.max(1) as f32) as i32,
-            |l| l.resolve(display.height),
-        );
+        // The box the grid may fill. Left alone it is most of the display, and
+        // being a percentage it travels between monitors.
+        let max_w = cfg
+            .max_width
+            .unwrap_or(Length::Ppt(90.0))
+            .resolve(display.width);
+        let max_h = cfg
+            .max_height
+            .unwrap_or(Length::Ppt(90.0))
+            .resolve(display.height);
         let theme = Theme {
             bg: cfg.background.unwrap_or(base.bg),
             fg: cfg.foreground.unwrap_or(base.fg),
@@ -158,10 +159,10 @@ impl Args {
             border_px: cfg
                 .border_width
                 .map_or(base.border_px, |l| l.resolve(display.width)),
-            tile_w: tile_w.max(1),
-            tile_h: tile_h.max(1),
+            max_w: max_w.max(1),
+            max_h: max_h.max(1),
             max_cols: cfg.max_columns.unwrap_or(base.max_cols).max(1),
-            max_rows: cfg.max_rows.map(|r| r.max(1)).or(base.max_rows),
+            max_rows: cfg.max_rows.unwrap_or(base.max_rows).max(1),
             labels: self.labels.or(cfg.labels).unwrap_or(base.labels),
             font: self
                 .font

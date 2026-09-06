@@ -14,20 +14,21 @@ pub struct Theme {
     pub border: Argb,
     /// Window border, logical px (rasi `border: 0.18em` at 12pt ~ 2px).
     pub border_px: i32,
-    /// Thumbnail cell, logical px. 16:9 so wide windows fill it instead of
-    /// letterboxing in a square box.
-    pub tile_w: i32,
-    pub tile_h: i32,
+    /// The box the grid may not exceed, in logical px. Thumbnails are sized to
+    /// divide it by the column and row caps below, so a thumbnail is the same
+    /// size whether one window is open or thirty — only the window around them
+    /// shrinks to hug what is there.
+    pub max_w: i32,
+    pub max_h: i32,
     /// Padding inside one element, i.e. around its thumbnail (rasi `element`).
     pub pad: i32,
     /// Space between elements (rasi `listview { spacing }`).
     pub gap: i32,
     /// Margin between the grid and the window edge.
     pub margin: i32,
+    /// How many tiles the grid may show at once. Rows beyond `max_rows` scroll.
     pub max_cols: i32,
-    /// Cap on rows shown at once. Without it the viewport is as tall as the
-    /// display allows; with it the grid stays compact and scrolls sooner.
-    pub max_rows: Option<i32>,
+    pub max_rows: i32,
     /// Gap between a thumbnail and its label (rasi `element { spacing }`).
     pub spacing: i32,
     /// Label font family, resolved against the system's fonts. The default is
@@ -50,13 +51,17 @@ impl Default for Theme {
             sel_fg: 0xff282828,
             border: 0xffd79921,
             border_px: 2,
-            tile_w: 220,
-            tile_h: 220 * 9 / 16,
+            // Placeholders: the command line resolves these against the
+            // display the grid will appear on.
+            max_w: 1152,
+            max_h: 1296,
             pad: 12,
             gap: 15,
             margin: 12,
+            // Equal caps make a cell shaped like the display, since max_w and
+            // max_h are the same fraction of it.
             max_cols: 4,
-            max_rows: None,
+            max_rows: 4,
             spacing: 10,
             font: crate::text::SYSTEM_MONO.to_string(),
             font_px: 13.3,
@@ -88,35 +93,39 @@ pub struct Layout {
     labels: bool,
 }
 
-/// How much of the display the grid may occupy.
-const FILL: i32 = 90;
-
 impl Layout {
     /// A balanced grid: ceil(sqrt(n)) columns, capped, so the last row isn't
     /// ragged (6 windows -> 3x2, not 4x2 with two holes). Same rule rofigrid uses.
     ///
-    /// Tiles are the size the theme asks for — a configured size that quietly
-    /// shrank would be a setting ignored — so when the grid needs more rows than
-    /// the display can show, the extra rows scroll. Only a tile too large for
-    /// even one row or column is shrunk, since then something has to give.
+    /// A thumbnail is the size that divides the configured box by the column and
+    /// row caps, so it does not change with how many windows are open: one
+    /// window gets a normal thumbnail in a small overlay, thirty get the same
+    /// thumbnail and scroll. The overlay then hugs whatever is actually there.
     pub fn new(t: &Theme, n: i32, display: (i32, i32)) -> Self {
-        let (dw, dh) = (display.0.max(1), display.1.max(1));
-        let room_w = (dw * FILL / 100 - 2 * t.margin).max(1);
-        let room_h = (dh * FILL / 100 - 2 * t.margin).max(1);
+        let n = n.max(0);
+        let (cap_cols, cap_rows) = (t.max_cols.max(1), t.max_rows.max(1));
+        // The box may never exceed the display, whatever the config says.
+        let box_w = t.max_w.clamp(1, display.0.max(1));
+        let box_h = t.max_h.clamp(1, display.1.max(1));
         let label_row = if t.labels { t.spacing + t.line_h } else { 0 };
-        let (tile_w, tile_h) = shrink_to_one(t, label_row, room_w, room_h);
+
+        // Divide the box by the caps: what is left after the furniture is one
+        // thumbnail.
+        let per_col = 2 * t.pad + t.gap;
+        let per_row = 2 * t.pad + label_row + t.gap;
+        let tile_w = ((box_w - 2 * t.margin + t.gap) / cap_cols - per_col).max(1);
+        let tile_h = ((box_h - 2 * t.margin + t.gap) / cap_rows - per_row).max(1);
         let (elem_w, elem_h) = (tile_w + 2 * t.pad, tile_h + label_row + 2 * t.pad);
 
-        // Columns: the balanced rule, capped by the config and by what fits.
+        // Columns: the balanced rule, so a handful of windows makes a tidy grid
+        // rather than one long row, capped by the config.
         let mut cols = (n as f64).sqrt() as i32;
         if cols * cols < n {
             cols += 1;
         }
-        let fit_cols = ((room_w + t.gap) / (elem_w + t.gap)).max(1);
-        cols = cols.clamp(1, t.max_cols.min(fit_cols)).max(1);
+        cols = cols.clamp(1, cap_cols);
         let rows = (n + cols - 1) / cols;
-        let fits = (room_h + t.gap) / (elem_h + t.gap);
-        let visible_rows = fits.min(t.max_rows.unwrap_or(fits)).clamp(1, rows.max(1));
+        let visible_rows = cap_rows.clamp(1, rows.max(1));
 
         Self {
             cols,
@@ -243,21 +252,6 @@ impl Layout {
     }
 }
 
-/// A tile larger than one row or column of the display has to give way, since
-/// nothing can be shown otherwise. Both axes shrink together, keeping its shape.
-fn shrink_to_one(t: &Theme, label_row: i32, room_w: i32, room_h: i32) -> (i32, i32) {
-    let (want_w, want_h) = (t.tile_w.max(1), t.tile_h.max(1));
-    let cell_w = want_w + 2 * t.pad;
-    let cell_h = want_h + label_row + 2 * t.pad;
-    let scale = (room_w as f32 / cell_w as f32)
-        .min(room_h as f32 / cell_h as f32)
-        .min(1.0);
-    (
-        ((want_w as f32 * scale) as i32).max(1),
-        ((want_h as f32 * scale) as i32).max(1),
-    )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub x: i32,
@@ -303,60 +297,100 @@ pub fn fit_centred(w: i32, h: i32, box_: Rect) -> Rect {
 mod tests {
     use super::*;
 
-    /// A display large enough that nothing is clamped, so the geometry tests
-    /// keep testing geometry.
+    /// A display large enough that the caps, not the screen, decide everything.
     const ROOMY: (i32, i32) = (10_000, 10_000);
 
-    /// The grid maths must match rofigrid's, or the window stops hugging the grid.
+    /// The caps and the box are what the config sets; a test theme states them
+    /// outright rather than relying on placeholders.
+    fn theme(max_w: i32, max_h: i32, cols: i32, rows: i32) -> Theme {
+        Theme {
+            max_w,
+            max_h,
+            max_cols: cols,
+            max_rows: rows,
+            ..Theme::default()
+        }
+    }
+
     #[test]
-    fn grid_matches_rofigrid() {
-        let t = Theme::default();
-        // (n, cols, rows) from rofigrid: cols = min(ceil(sqrt(n)), 4)
+    fn a_thumbnail_is_the_box_divided_by_the_caps() {
+        let t = theme(1000, 900, 4, 3);
+        let l = Layout::new(&t, 12, ROOMY);
+        let tile = l.tile(0, 0).expect("visible");
+        // Four columns of (tile + padding) plus three gaps plus two margins fill
+        // the box, give or take integer division.
+        let used = 4 * (tile.w + 2 * t.pad) + 3 * t.gap + 2 * t.margin;
+        assert!((1000 - used).abs() <= 4, "width {used} should fill 1000");
+        let label_row = t.spacing + t.line_h;
+        let used = 3 * (tile.h + label_row + 2 * t.pad) + 2 * t.gap + 2 * t.margin;
+        assert!((900 - used).abs() <= 4, "height {used} should fill 900");
+    }
+
+    #[test]
+    fn one_window_gets_the_same_thumbnail_as_thirty() {
+        let t = theme(1000, 900, 4, 3);
+        let one = Layout::new(&t, 1, ROOMY);
+        let many = Layout::new(&t, 30, ROOMY);
+        assert_eq!(
+            one.tile(0, 0).expect("visible").w,
+            many.tile(0, 0).expect("visible").w,
+            "thumbnail size must not depend on how many windows are open"
+        );
+        // The overlay hugs what is there: one tile is a small window.
+        assert_eq!((one.cols, one.rows), (1, 1));
+        assert!(
+            one.width < many.width && one.height < many.height,
+            "{one:?}"
+        );
+        assert!(!one.scrollable() && many.scrollable());
+    }
+
+    #[test]
+    fn grids_stay_balanced_and_within_the_caps() {
+        let t = theme(1000, 900, 4, 3);
+        // (n, cols, rows): ceil(sqrt(n)) columns, capped at four.
         for (n, cols, rows) in [
             (1, 1, 1),
             (2, 2, 1),
             (4, 2, 2),
             (6, 3, 2),
             (12, 4, 3),
-            (17, 4, 5),
+            (30, 4, 8),
         ] {
             let l = Layout::new(&t, n, ROOMY);
             assert_eq!((l.cols, l.rows), (cols, rows), "n = {n}");
-            // rofigrid: win_w = cols*(ICON+24) + (cols-1)*15 + 24
-            assert_eq!(
-                l.width,
-                cols * (t.tile_w + 24) + (cols - 1) * 15 + 24,
-                "width n = {n}"
-            );
+            assert!(l.visible_rows <= t.max_rows, "n = {n}");
         }
     }
 
     #[test]
     fn elements_stay_inside_the_window() {
-        let t = Theme::default();
-        for n in 1..=20 {
+        let t = theme(1000, 900, 4, 3);
+        for n in 1..=12 {
             let l = Layout::new(&t, n, ROOMY);
             for i in 0..n {
                 let e = l.elem(i, 0).expect("visible");
                 assert!(e.x >= 0 && e.x + e.w <= l.width, "n = {n}, i = {i}");
                 assert!(e.y >= 0 && e.y + e.h <= l.height, "n = {n}, i = {i}");
-                let tile = l.tile(i, 0).expect("visible");
-                assert!(tile.w == t.tile_w && tile.h == t.tile_h);
             }
         }
     }
 
     #[test]
-    fn labels_add_a_row_under_each_thumbnail() {
-        let mut t = Theme::default();
-        let with = Layout::new(&t, 4, ROOMY);
+    fn labels_take_their_room_from_the_thumbnail() {
+        let mut t = theme(1000, 900, 4, 3);
+        let with = Layout::new(&t, 12, ROOMY);
         t.labels = false;
-        let without = Layout::new(&t, 4, ROOMY);
-        let rows = 2;
-        assert_eq!(with.height - without.height, rows * (t.spacing + t.line_h));
-        assert!(without.label(0, 0).is_none());
+        let without = Layout::new(&t, 12, ROOMY);
+        // The box is fixed, so dropping labels makes thumbnails taller rather
+        // than the window shorter.
+        assert!(
+            without.tile(0, 0).expect("visible").h > with.tile(0, 0).expect("visible").h,
+            "thumbnails should grow into the freed row"
+        );
+        assert!(with.label(0, 0).is_some() && without.label(0, 0).is_none());
 
-        let t = Theme::default();
+        let t = theme(1000, 900, 4, 3);
         let l = Layout::new(&t, 4, ROOMY);
         for i in 0..4 {
             let (tile, label, elem) = (
@@ -364,53 +398,20 @@ mod tests {
                 l.label(i, 0).unwrap(),
                 l.elem(i, 0).expect("visible"),
             );
-            assert_eq!(tile.h, t.tile_h);
             assert_eq!(label.y, tile.y + tile.h + t.spacing);
             assert_eq!(label.w, tile.w);
-            // Everything, padding included, stays inside the element.
             assert!(label.y + label.h + t.pad <= elem.y + elem.h);
         }
     }
 
     #[test]
-    fn a_tile_too_big_for_one_cell_is_the_only_thing_that_shrinks() {
-        let mut t = Theme::default();
-        let roomy = Layout::new(&t, 12, ROOMY);
-        assert_eq!(
-            roomy.tile(0, 0).expect("visible").w,
-            t.tile_w,
-            "left alone when there is room"
-        );
-
-        // A tile wider and taller than the whole screen has to give way, since
-        // otherwise there is nothing to show.
-        t.tile_w = 2000;
-        t.tile_h = 1500;
-        let l = Layout::new(&t, 4, (800, 600));
-        let tile = l.tile(0, 0).expect("visible");
-        assert!(tile.w < t.tile_w && tile.h < t.tile_h, "should have shrunk");
-        assert!(l.width <= 800 && l.height <= 600, "{l:?}");
-        assert_eq!(l.cols, 1, "only one column can fit");
-        // Shrinking keeps the tile's shape.
-        let (want, got) = (
-            t.tile_w as f32 / t.tile_h as f32,
-            tile.w as f32 / tile.h as f32,
-        );
-        assert!(
-            (want - got).abs() < 0.05,
-            "aspect {got} drifted from {want}"
-        );
-    }
-
-    #[test]
-    fn a_tiny_display_never_gets_an_oversized_surface() {
-        let t = Theme::default();
-        // Thirty windows on a 640x480 screen: only a row or two can be shown,
-        // and the rest scroll.
+    fn the_box_never_exceeds_the_display() {
+        // A config asking for more than the screen has, on a small screen.
+        let t = theme(4000, 3000, 4, 3);
         let l = Layout::new(&t, 30, (640, 480));
-        let tile = l.tile(0, 0).expect("visible");
-        assert!(tile.w >= 1 && tile.h >= 1, "{l:?}");
         assert!(l.width <= 640 && l.height <= 480, "{l:?}");
+        assert!(l.tile(0, 0).expect("visible").w >= 1);
+        assert!(l.scrollable());
     }
 
     #[test]
@@ -452,18 +453,11 @@ mod tests {
 
     #[test]
     fn rows_beyond_the_display_scroll_instead_of_shrinking() {
-        let t = Theme::default();
-        // Thirty tiles cannot fit; the configured tile size must survive anyway.
-        let l = Layout::new(&t, 30, (1280, 1440));
-        assert_eq!(
-            l.tile(0, 0).expect("visible").w,
-            t.tile_w,
-            "tiles kept their size"
-        );
+        let t = theme(1000, 900, 4, 3);
+        // Thirty tiles need more rows than the cap allows, so they scroll.
+        let l = Layout::new(&t, 30, ROOMY);
         assert!(l.scrollable(), "{l:?} should scroll");
         assert!(l.visible_rows < l.rows);
-        assert!(l.height <= 1440 && l.width <= 1280, "{l:?}");
-
         // The viewport shows a window of rows, and nothing outside it.
         let per_screen = (l.visible_rows * l.cols) as usize;
         assert!(l.elem(0, 0).is_some());
@@ -479,10 +473,10 @@ mod tests {
 
     #[test]
     fn max_rows_keeps_the_grid_compact() {
-        let mut t = Theme::default();
-        let full = Layout::new(&t, 30, (1280, 1440));
-        t.max_rows = Some(2);
-        let capped = Layout::new(&t, 30, (1280, 1440));
+        let mut t = theme(1000, 900, 4, 3);
+        let full = Layout::new(&t, 30, ROOMY);
+        t.max_rows = 2;
+        let capped = Layout::new(&t, 30, ROOMY);
         assert!(
             capped.visible_rows == 2 && full.visible_rows > 2,
             "{capped:?}"
@@ -491,16 +485,16 @@ mod tests {
         assert!(capped.scrollable());
         // The cap cannot invent rows: four tiles make a 2x2 grid, and a cap of
         // five leaves it alone.
-        t.max_rows = Some(5);
-        let few = Layout::new(&t, 4, (1280, 1440));
+        t.max_rows = 5;
+        let few = Layout::new(&t, 4, ROOMY);
         assert_eq!((few.cols, few.rows, few.visible_rows), (2, 2, 2), "{few:?}");
         assert!(!few.scrollable());
     }
 
     #[test]
     fn revealing_moves_the_viewport_as_little_as_possible() {
-        let t = Theme::default();
-        let l = Layout::new(&t, 30, (1280, 1440));
+        let t = theme(1000, 900, 4, 3);
+        let l = Layout::new(&t, 30, ROOMY);
         let last_visible = (l.visible_rows * l.cols - 1) as usize;
         assert_eq!(l.reveal(0, 0), 0, "already on screen");
         assert_eq!(l.reveal(last_visible, 0), 0, "still on screen");
@@ -514,8 +508,8 @@ mod tests {
 
     #[test]
     fn hit_testing_follows_the_scroll() {
-        let t = Theme::default();
-        let l = Layout::new(&t, 30, (1280, 1440));
+        let t = theme(1000, 900, 4, 3);
+        let l = Layout::new(&t, 30, ROOMY);
         let first = l.elem(0, 0).expect("visible");
         let probe = (first.x + first.w / 2, first.y + first.h / 2);
         assert_eq!(l.hit(probe.0, probe.1, 0), Some(0));
@@ -525,9 +519,9 @@ mod tests {
 
     #[test]
     fn a_scrollbar_appears_only_when_there_is_more_to_see() {
-        let t = Theme::default();
+        let t = theme(1000, 900, 4, 3);
         assert!(Layout::new(&t, 4, ROOMY).scrollbar(0, 4).is_none());
-        let l = Layout::new(&t, 30, (1280, 1440));
+        let l = Layout::new(&t, 30, ROOMY);
         let (track, top) = l.scrollbar(0, 4).expect("scrollable");
         assert_eq!(top.y, track.y, "thumb starts at the top");
         assert!(top.h < track.h, "thumb is shorter than its track");
