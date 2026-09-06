@@ -1,6 +1,14 @@
-//! Look and layout, ported from the rofi setup this replaces (mytheme.rasi +
-//! the -theme-str rofigrid builds): gruvbox dark, a yellow selection that fills
-//! the element padding, and a window that hugs the grid.
+//! Look and layout.
+//!
+//! The colours and spacing come from the rofi setup this replaces (mytheme.rasi
+//! plus the -theme-str rofigrid built): gruvbox dark, a yellow selection filling
+//! the element padding, `title · app` centred under each thumbnail.
+//!
+//! Sizing works from caps rather than from a thumbnail size. The config gives a
+//! box the grid may fill and a column and row limit; a thumbnail is that box
+//! divided by those limits. So a thumbnail is the same size whether one window
+//! is open or thirty — the overlay hugs whatever is there, and rows past the
+//! limit scroll.
 
 /// 0xAARRGGBB, premultiplied (everything here is opaque).
 pub type Argb = u32;
@@ -51,10 +59,10 @@ impl Default for Theme {
             sel_fg: 0xff282828,
             border: 0xffd79921,
             border_px: 2,
-            // Placeholders: the command line resolves these against the
-            // display the grid will appear on.
-            max_w: 1152,
-            max_h: 1296,
+            // No cap of their own: Layout clamps to the display, and the
+            // command line resolves the configured percentage over the top.
+            max_w: i32::MAX,
+            max_h: i32::MAX,
             pad: 12,
             gap: 15,
             margin: 12,
@@ -75,13 +83,13 @@ impl Default for Theme {
 #[derive(Debug)]
 pub struct Layout {
     pub cols: i32,
-    /// Rows the whole grid needs, and how many of them fit on screen at once.
+    /// Rows the whole grid needs, and how many of them are on screen at once.
     pub rows: i32,
     pub visible_rows: i32,
-    /// How many tiles there are, which the last row may not fill.
-    n: i32,
     pub width: i32,
     pub height: i32,
+    /// How many tiles there are, which the last row may not fill.
+    n: i32,
     elem_w: i32,
     elem_h: i32,
     margin: i32,
@@ -94,13 +102,14 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// A balanced grid: ceil(sqrt(n)) columns, capped, so the last row isn't
-    /// ragged (6 windows -> 3x2, not 4x2 with two holes). Same rule rofigrid uses.
+    /// Lay out `n` tiles for a display of the given logical size.
     ///
-    /// A thumbnail is the size that divides the configured box by the column and
-    /// row caps, so it does not change with how many windows are open: one
-    /// window gets a normal thumbnail in a small overlay, thirty get the same
-    /// thumbnail and scroll. The overlay then hugs whatever is actually there.
+    /// A thumbnail is the configured box divided by the column and row caps, so
+    /// it does not change with how many windows are open: one window gets a
+    /// normal thumbnail in a small overlay, thirty get the same thumbnail and
+    /// scroll. Columns follow ceil(sqrt(n)) up to the cap, so a handful of
+    /// windows makes a tidy grid rather than one long row — the rule rofigrid
+    /// used — and the overlay hugs whatever is there.
     pub fn new(t: &Theme, n: i32, display: (i32, i32)) -> Self {
         let n = n.max(0);
         let (cap_cols, cap_rows) = (t.max_cols.max(1), t.max_rows.max(1));
@@ -124,6 +133,7 @@ impl Layout {
             cols += 1;
         }
         cols = cols.clamp(1, cap_cols);
+        // i32::div_ceil is still unstable; only the unsigned one is not.
         let rows = (n + cols - 1) / cols;
         let visible_rows = cap_rows.clamp(1, rows.max(1));
 

@@ -236,30 +236,31 @@ impl App {
         surface.commit();
     }
 
-    fn move_sel(&mut self, delta: i32) {
+    fn move_sel(&mut self, delta: i32, qh: &QueueHandle<Self>) {
         let n = self.tiles.len() as i32;
         if n == 0 {
             return;
         }
-        self.select((self.sel as i32 + delta).rem_euclid(n) as usize);
+        self.select((self.sel as i32 + delta).rem_euclid(n) as usize, qh);
     }
 
-    fn move_row(&mut self, rows: i32) {
+    fn move_row(&mut self, rows: i32, qh: &QueueHandle<Self>) {
         let n = self.tiles.len() as i32;
         let target = self.sel as i32 + rows * self.layout.cols;
         if target >= 0 && target < n {
-            self.select(target as usize);
+            self.select(target as usize, qh);
         }
     }
 
     /// Move the selection, scrolling the least that keeps it on screen. Every
-    /// keyboard move goes through here, so the selection is never off-view.
-    fn select(&mut self, i: usize) {
+    /// move goes through here, so the selection is never off-view and the
+    /// subsurfaces always match the viewport.
+    fn select(&mut self, i: usize, qh: &QueueHandle<Self>) {
         self.sel = i;
         let scroll = self.layout.reveal(i, self.scroll);
         if scroll != self.scroll {
             self.scroll = scroll;
-            self.needs_tiles = true;
+            self.sync_tiles(qh);
         }
         self.paint();
     }
@@ -294,7 +295,7 @@ impl App {
         }
     }
 
-    fn key(&mut self, code: u32) {
+    fn key(&mut self, code: u32, qh: &QueueHandle<Self>) {
         match code {
             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => self.shift = true,
             KEY_ESC | KEY_Q => self.ending = Ending::Cancelled,
@@ -302,15 +303,15 @@ impl App {
                 self.picked = self.tiles.get(self.sel).map(|t| t.target.clone());
                 self.ending = Ending::Picked;
             }
-            KEY_TAB if self.shift => self.move_sel(-1),
-            KEY_TAB | KEY_RIGHT | KEY_L => self.move_sel(1),
-            KEY_LEFT | KEY_H => self.move_sel(-1),
-            KEY_DOWN | KEY_J => self.move_row(1),
-            KEY_UP | KEY_K => self.move_row(-1),
-            KEY_HOME => self.select(0),
-            KEY_END => self.select(self.tiles.len().saturating_sub(1)),
-            KEY_PGUP => self.move_row(-self.layout.visible_rows),
-            KEY_PGDN => self.move_row(self.layout.visible_rows),
+            KEY_TAB if self.shift => self.move_sel(-1, qh),
+            KEY_TAB | KEY_RIGHT | KEY_L => self.move_sel(1, qh),
+            KEY_LEFT | KEY_H => self.move_sel(-1, qh),
+            KEY_DOWN | KEY_J => self.move_row(1, qh),
+            KEY_UP | KEY_K => self.move_row(-1, qh),
+            KEY_HOME => self.select(0, qh),
+            KEY_END => self.select(self.tiles.len().saturating_sub(1), qh),
+            KEY_PGUP => self.move_row(-self.layout.visible_rows, qh),
+            KEY_PGDN => self.move_row(self.layout.visible_rows, qh),
             _ => {}
         }
     }
@@ -373,11 +374,11 @@ impl Dispatch<WlKeyboard, ()> for App {
         event: wl_keyboard::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         if let wl_keyboard::Event::Key { key, state, .. } = event {
             match state {
-                WEnum::Value(wl_keyboard::KeyState::Pressed) => app.key(key),
+                WEnum::Value(wl_keyboard::KeyState::Pressed) => app.key(key, qh),
                 WEnum::Value(wl_keyboard::KeyState::Released)
                     if key == KEY_LEFTSHIFT || key == KEY_RIGHTSHIFT =>
                 {
@@ -399,7 +400,7 @@ impl Dispatch<WlPointer, ()> for App {
         event: wl_pointer::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
@@ -437,7 +438,9 @@ impl Dispatch<WlPointer, ()> for App {
                 state: WEnum::Value(state),
                 ..
             } => app.click(state == wl_pointer::ButtonState::Pressed),
-            wl_pointer::Event::Axis { value, .. } => app.move_sel(if value > 0.0 { 1 } else { -1 }),
+            wl_pointer::Event::Axis { value, .. } => {
+                app.move_sel(if value > 0.0 { 1 } else { -1 }, qh)
+            }
             _ => {}
         }
     }

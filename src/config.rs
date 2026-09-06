@@ -151,7 +151,12 @@ impl Config {
             "live" => self.live = Some(Live::parse(value)?),
             "fps" => self.fps = Some(number(value)?),
             "format" => self.format = Some(Format::parse(value)?),
-            "timeout" => self.timeout = Some(Duration::from_secs_f64(number(value)?)),
+            // Zero is how you say "no timeout"; an immediate deadline would
+            // only ever be a mistake.
+            "timeout" => {
+                let secs: f64 = number(value)?;
+                self.timeout = (secs > 0.0).then(|| Duration::from_secs_f64(secs));
+            }
             other => return Err(format!("unknown setting {other:?}")),
         }
         Ok(())
@@ -236,6 +241,7 @@ max-rows = 3
 live = current
 fps = 30
 labels = no
+timeout = 0
 ",
         )
         .expect("should parse");
@@ -247,6 +253,7 @@ labels = no
         assert_eq!(cfg.max_rows, Some(3));
         assert_eq!(cfg.fps, Some(30));
         assert_eq!(cfg.labels, Some(false));
+        assert_eq!(cfg.timeout, None, "zero means no timeout");
         assert!(cfg.live.is_some());
         // Untouched settings stay unset, so defaults survive.
         assert_eq!(cfg.foreground, None);

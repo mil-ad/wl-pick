@@ -56,12 +56,9 @@ pub struct Settings {
     pub theme: Theme,
     pub live: Live,
     pub fps: u32,
-    /// Integer scale of the display the overlay renders on.
+    /// Integer scale of the display the overlay renders on, and its name, so
+    /// the overlay maps there rather than wherever the compositor would put it.
     pub scale: i32,
-    /// That display's logical size, which the grid is fitted into.
-    pub display: (i32, i32),
-    /// And its name, so the overlay maps there rather than wherever the
-    /// compositor would have put it.
     pub output: String,
 }
 
@@ -90,8 +87,6 @@ pub struct App {
     pub(crate) sel: usize,
     /// First row of the grid on screen. The rest scroll.
     pub(crate) scroll: i32,
-    /// Set when the viewport moved and the subsurfaces need re-placing.
-    pub(crate) needs_tiles: bool,
     pub(crate) shift: bool,
 
     /// Where the pointer is, and which tile it pressed. Hovering deliberately
@@ -158,16 +153,15 @@ impl App {
         qh: &QueueHandle<Self>,
         targets: Vec<Target>,
         settings: Settings,
+        layout: Layout,
     ) -> Result<Self, Box<dyn Error>> {
         let Settings {
             theme,
             live,
             fps,
             scale,
-            display,
             output,
         } = settings;
-        let layout = Layout::new(&theme, targets.len() as i32, display);
         // Bind everything up front so a compositor missing a protocol fails
         // here, with a name, rather than halfway through a capture.
         let mut app = Self {
@@ -190,7 +184,6 @@ impl App {
             scale,
             sel: 0,
             scroll: 0,
-            needs_tiles: false,
             shift: false,
             hover: None,
             pressed: None,

@@ -64,6 +64,7 @@ config:
     live           = all
     fps            = 12
     format         = tsv
+    timeout        = 0            # seconds; 0 means none
 
 formats:
 
@@ -118,6 +119,8 @@ pub struct Options {
     pub format: Format,
     pub outputs: bool,
     pub timeout: Option<Duration>,
+    /// The logical size of the display the grid will be laid out for.
+    pub display: (i32, i32),
     pub settings: Settings,
 }
 
@@ -182,12 +185,12 @@ impl Args {
             format: self.format.or(cfg.format).unwrap_or(Format::Tsv),
             outputs: self.outputs.or(cfg.outputs).unwrap_or(true),
             timeout: self.timeout.or(cfg.timeout),
+            display: (display.width, display.height),
             settings: Settings {
                 theme,
                 live: self.live.or(cfg.live).unwrap_or(Live::All),
                 fps: self.fps.or(cfg.fps).unwrap_or(12),
                 scale: display.scale,
-                display: (display.width, display.height),
                 output: display.name.clone(),
             },
         }
@@ -226,7 +229,7 @@ pub fn parse_args() -> Result<Args, String> {
             "--timeout" => {
                 let v = it.next().ok_or("--timeout needs seconds")?;
                 let secs: f64 = v.parse().map_err(|_| format!("bad --timeout: {v}"))?;
-                args.timeout = Some(Duration::from_secs_f64(secs));
+                args.timeout = (secs > 0.0).then(|| Duration::from_secs_f64(secs));
             }
             "-h" | "--help" => {
                 print!("{HELP}");

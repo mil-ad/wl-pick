@@ -57,9 +57,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, Box<dyn Error>> {
-    let args = cli::parse_args().map_err(|e| -> Box<dyn Error> { e.into() })?;
-    let config =
-        Config::load(args.config.as_deref()).map_err(|e| -> Box<dyn Error> { e.into() })?;
+    let args = cli::parse_args().map_err(Box::<dyn Error>::from)?;
+    let config = Config::load(args.config.as_deref()).map_err(Box::<dyn Error>::from)?;
 
     let start = Instant::now();
     let mut phases = Phases::new(args.verbose);
@@ -88,29 +87,29 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     phases.mark("sway-tree");
 
     cli::arm_timeout(opts.timeout);
-    let settings = opts.settings;
+    let (display, settings) = (opts.display, opts.settings);
     let theme = &settings.theme;
     let scale = settings.scale;
+    // The grid is measured once here: the label shaping below and the overlay
+    // itself must agree about how wide a label may be.
+    let layout = Layout::new(theme, targets.len() as i32, display);
     // Start shaping labels now: it costs ~55ms of font loading and glyph
     // rasterising, and the captures below are ~55ms of waiting on the
     // compositor, so the two overlap almost exactly.
-    let labels = theme.labels.then(|| {
-        let layout = Layout::new(theme, targets.len() as i32, settings.display);
+    let labels = layout.label(0, 0).map(|label| {
         text::spawn(
             targets.iter().map(Target::label).collect(),
             theme.font.clone(),
             theme.font_px * scale as f32,
             (theme.line_h * scale) as f32,
-            // The label box is a tile wide; with no tiles there is nothing to
-            // shape anyway.
-            (layout.label(0, 0).map(|r| r.w).unwrap_or(1) * scale) as f32,
+            (label.w * scale) as f32,
         )
     });
 
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
     let qh = queue.handle();
-    let mut app = App::new(&globals, &qh, targets, settings)?;
+    let mut app = App::new(&globals, &qh, targets, settings, layout)?;
 
     // Two roundtrips: one for the toplevel list, one for each handle's state.
     queue.roundtrip(&mut app)?;
@@ -141,15 +140,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     conn.flush()?;
     phases.mark("mapped");
 
-    // Scrolling re-places the subsurfaces; doing it here rather than inside the
-    // key handler coalesces a held-down arrow into one update per dispatch.
-    while !app.finished() {
-        queue.blocking_dispatch(&mut app)?;
-        if std::mem::take(&mut app.needs_tiles) {
-            app.sync_tiles(&qh);
-            conn.flush()?;
-        }
-    }
+    pump(&mut queue, &mut app, |a| a.finished())?;
     if opts.verbose {
         app.report(start.elapsed());
     }

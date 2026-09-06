@@ -162,6 +162,7 @@ outputs        = yes
 live           = all
 fps            = 12
 format         = tsv
+timeout        = 0            # seconds; 0 means none
 ```
 
 Sizes take sway's units: `600px` is absolute, `90ppt` a percentage — and the
