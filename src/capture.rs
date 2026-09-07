@@ -398,8 +398,6 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 app.frame_ready(i);
             }
             ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
-                // Live mode just retries on the next tick; only a failure with no
-                // frame yet leaves the tile without a thumbnail.
                 // Live mode retries on the next tick; only a failure with no
                 // frame yet leaves the tile without a thumbnail.
                 if tile.frames == 0 {

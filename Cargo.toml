@@ -16,7 +16,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
-rustix = { version = "1", features = ["fs", "mm", "shm"] }
+rustix = { version = "1", features = ["event", "fs", "mm", "shm"] }
 swayipc = "4"
 cosmic-text = "0.19"
 

@@ -36,15 +36,26 @@ mod theme;
 
 use std::error::Error;
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::{Connection, EventQueue};
 
-use app::App;
+use app::{App, Ending};
 use config::Config;
 use target::Target;
 use theme::Layout;
+
+/// How long the phases before the overlay is interactive may take. Capture
+/// measures ~90ms for fourteen windows, so this is a wide margin around
+/// anything healthy, and only a stall reaches it.
+const STARTUP_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long a keyboard leave is given to turn out to be a focus refresh rather
+/// than a real loss. sway's pair arrives microseconds apart; this is only long
+/// enough to be sure, and short enough that a real handover looks instant.
+const REFOCUS_GRACE: Duration = Duration::from_millis(150);
 
 fn main() -> ExitCode {
     match run() {
@@ -121,7 +132,18 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     phases.mark("constraints");
 
     app.start_captures(&qh)?;
-    pump(&mut queue, &mut app, |a| a.captures_settled())?;
+    // Tiles that never delivered are shown as labels without a thumbnail,
+    // exactly as an outright capture failure is. Better a grid you can use
+    // than a process you have to hunt down.
+    if !pump_for(
+        &conn,
+        &mut queue,
+        &mut app,
+        |a| a.captures_settled(),
+        STARTUP_BUDGET,
+    )? {
+        app.report_unsettled();
+    }
     phases.mark("capture");
 
     if let Some(job) = labels {
@@ -133,14 +155,44 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     }
 
     app.show(&qh)?;
-    pump(&mut queue, &mut app, |a| a.configured)?;
+    if !pump_for(
+        &conn,
+        &mut queue,
+        &mut app,
+        |a| a.configured,
+        STARTUP_BUDGET,
+    )? {
+        return Err("the compositor never configured the overlay".into());
+    }
     app.paint();
     app.sync_tiles(&qh);
     app.arm_frame_callback(&qh);
     conn.flush()?;
     phases.mark("mapped");
 
-    pump(&mut queue, &mut app, |a| a.finished())?;
+    // The keyboard grab is what makes the overlay usable, so losing it for
+    // good ends the run: that is how a second wl-pick, started from the same
+    // keybinding, replaces the first instead of leaving it stranded on screen.
+    // A leave only counts once it has failed to come back, because sway also
+    // cycles focus off and on in a single batch as the pointer crosses us.
+    loop {
+        queue.blocking_dispatch(&mut app)?;
+        if !app.finished()
+            && !app.focused
+            && !pump_for(
+                &conn,
+                &mut queue,
+                &mut app,
+                |a| a.focused || a.finished(),
+                REFOCUS_GRACE,
+            )?
+        {
+            app.ending = Ending::Unfocused;
+        }
+        if app.finished() {
+            break;
+        }
+    }
     if opts.verbose {
         app.report(start.elapsed());
     }
@@ -160,16 +212,49 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Run the event loop until `done`.
-fn pump(
+/// Run the event loop until `done`, or until `limit` has passed. Returns
+/// whether `done` came true in time.
+///
+/// Every wait before the overlay is interactive is bounded, because a
+/// compositor is entitled to simply never answer. sway does exactly that for a
+/// capture request on a toplevel another client is already capturing: no frame,
+/// no `failed`, no `stopped`, just silence — and an unbounded wait on that is a
+/// picker with no window that has to be killed from another terminal.
+fn pump_for(
+    conn: &Connection,
     queue: &mut EventQueue<App>,
     app: &mut App,
     done: impl Fn(&App) -> bool,
-) -> Result<(), Box<dyn Error>> {
-    while !done(app) {
-        queue.blocking_dispatch(app)?;
+    limit: Duration,
+) -> Result<bool, Box<dyn Error>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        queue.dispatch_pending(app)?;
+        if done(app) {
+            return Ok(true);
+        }
+        conn.flush()?;
+        // No guard means events arrived while we were asking; go read them.
+        let Some(guard) = conn.prepare_read() else {
+            continue;
+        };
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(false);
+        };
+        let fd = guard.connection_fd();
+        let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: left.as_secs() as _,
+            tv_nsec: left.subsec_nanos() as _,
+        };
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(0) => return Ok(false),
+            // An interrupted poll has simply not waited its full time yet.
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(Box::new(e)),
+        }
+        guard.read()?;
     }
-    Ok(())
 }
 
 /// Phase timings, printed with --verbose. Opening latency is the whole point of

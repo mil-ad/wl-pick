@@ -109,6 +109,8 @@ pub struct App {
     pub(crate) output: String,
 
     pub(crate) ending: Ending,
+    /// Whether we hold the keyboard. Without it the overlay cannot be operated.
+    pub(crate) focused: bool,
     pub(crate) picked: Option<Target>,
     pub(crate) stats: Stats,
 }
@@ -134,6 +136,8 @@ pub enum Ending {
     Picked,
     Cancelled,
     Closed,
+    /// The keyboard went to another surface, so we can no longer be operated.
+    Unfocused,
 }
 
 impl Ending {
@@ -143,6 +147,7 @@ impl Ending {
             Ending::Picked => "picked",
             Ending::Cancelled => "cancelled",
             Ending::Closed => "the compositor closed the overlay",
+            Ending::Unfocused => "lost the keyboard to another surface",
         }
     }
 }
@@ -196,6 +201,7 @@ impl App {
             configured: false,
             output,
             ending: Ending::Running,
+            focused: false,
             picked: None,
             stats: Stats::default(),
         };
@@ -271,6 +277,25 @@ impl App {
 
     pub fn captures_settled(&self) -> bool {
         self.tiles.iter().all(|t| t.settled)
+    }
+
+    /// Say which tiles the compositor went quiet on, and name the likeliest
+    /// reason: sway answers a capture request on a toplevel that another client
+    /// is already capturing with silence rather than with `failed`.
+    pub fn report_unsettled(&self) {
+        let stuck: Vec<&str> = self
+            .tiles
+            .iter()
+            .filter(|t| !t.settled)
+            .map(|t| t.target.title.as_str())
+            .collect();
+        eprintln!(
+            "wl-pick: no frame for {} of {} tiles ({}); \
+             another capture client may hold these sources",
+            stuck.len(),
+            self.tiles.len(),
+            stuck.join(", ")
+        );
     }
 }
 

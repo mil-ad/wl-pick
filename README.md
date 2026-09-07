@@ -91,6 +91,16 @@ chooser_type=simple
 chooser_cmd=wl-pick --format portal
 ```
 
+**Starting a second wl-pick replaces the first.** The new overlay takes the
+keyboard grab, and the one that loses it exits without printing anything — so
+hitting the keybinding twice leaves you with one overlay, not a stranded
+process. The catch is that sway answers a capture request for a toplevel
+another client is already capturing with silence — no frame, no failure — so
+the replacement's thumbnails are mostly blank until the first instance has
+gone. Every wait before the overlay is interactive is capped at two seconds
+for that reason: a tile that never arrives is drawn as a bare label, and the
+grid still works.
+
 | key | |
 |---|---|
 | `→` `←` / `l` `h` / `Tab` `Shift+Tab` | next / previous tile |

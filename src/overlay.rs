@@ -376,8 +376,8 @@ impl Dispatch<WlKeyboard, ()> for App {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Key { key, state, .. } = event {
-            match state {
+        match event {
+            wl_keyboard::Event::Key { key, state, .. } => match state {
                 WEnum::Value(wl_keyboard::KeyState::Pressed) => app.key(key, qh),
                 WEnum::Value(wl_keyboard::KeyState::Released)
                     if key == KEY_LEFTSHIFT || key == KEY_RIGHTSHIFT =>
@@ -385,7 +385,14 @@ impl Dispatch<WlKeyboard, ()> for App {
                     app.shift = false
                 }
                 _ => {}
-            }
+            },
+            // Focus is only tracked here. sway sends leave immediately
+            // followed by enter on the same surface when the pointer crosses
+            // it, so whether the grab is really gone is decided by the main
+            // loop, once the event batch has been dispatched.
+            wl_keyboard::Event::Enter { .. } => app.focused = true,
+            wl_keyboard::Event::Leave { .. } => app.focused = false,
+            _ => {}
         }
     }
 }
