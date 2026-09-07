@@ -20,8 +20,8 @@ usage: wl-pick [options]
   --live all|current|none   which tiles keep updating live [all]
                             (displays are always a single snapshot)
   --fps N                   cap on live updates per tile per second [12]
-  --no-outputs              windows only; displays are included by default
-  --hide-labels             draw an icon-only grid
+  --outputs, --no-outputs   include whole displays as tiles [yes]
+  --labels, --no-labels     a label under each thumbnail [yes]
   --font FAMILY             label font family [the system monospace font]
   --font-size PX            label size in logical px [13.3]
   --timeout SECS            exit anyway after SECS, in case the keyboard
@@ -198,8 +198,12 @@ impl Args {
 }
 
 pub fn parse_args() -> Result<Args, String> {
+    parse(std::env::args().skip(1))
+}
+
+fn parse(it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args::default();
-    let mut it = std::env::args().skip(1);
+    let mut it = it;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--format" => {
@@ -212,7 +216,10 @@ pub fn parse_args() -> Result<Args, String> {
                 args.config = Some(PathBuf::from(it.next().ok_or("--config needs a path")?))
             }
             "-v" | "--verbose" => args.verbose = true,
-            "--hide-labels" => args.labels = Some(false),
+            "--labels" => args.labels = Some(true),
+            // --hide-labels was the only spelling before --labels existed, and
+            // is still accepted for whatever it is wired into.
+            "--no-labels" | "--hide-labels" => args.labels = Some(false),
             "--live" => {
                 let v = it.next().ok_or("--live needs all|current|none")?;
                 args.live = Some(Live::parse(&v)?);
@@ -239,4 +246,62 @@ pub fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(flags: &[&str]) -> Args {
+        parse(flags.iter().map(|s| s.to_string())).expect("should parse")
+    }
+
+    /// A config file that sets both booleans the same way.
+    fn file(on: bool) -> Config {
+        Config {
+            outputs: Some(on),
+            labels: Some(on),
+            ..Config::default()
+        }
+    }
+
+    fn display() -> Display {
+        Display {
+            name: "DP-1".into(),
+            width: 2560,
+            height: 1440,
+            scale: 2,
+            focused: true,
+        }
+    }
+
+    #[test]
+    fn every_boolean_can_be_set_both_ways() {
+        assert_eq!(args(&["--outputs"]).outputs, Some(true));
+        assert_eq!(args(&["--no-outputs"]).outputs, Some(false));
+        assert_eq!(args(&["--labels"]).labels, Some(true));
+        assert_eq!(args(&["--no-labels"]).labels, Some(false));
+        assert_eq!(args(&["--hide-labels"]).labels, Some(false), "old spelling");
+        // Unset is what lets the file have its say.
+        assert_eq!(args(&[]).outputs, None);
+        assert_eq!(args(&[]).labels, None);
+    }
+
+    #[test]
+    fn a_flag_beats_the_file_in_both_directions() {
+        // Turning something back on is the case that used to be unsayable:
+        // there was a --no-outputs but no --outputs, so a config saying no
+        // could not be overridden from the command line at all.
+        let on = args(&["--outputs", "--labels"]).resolve(&file(false), &display());
+        assert!(on.outputs);
+        assert!(on.settings.theme.labels);
+
+        let off = args(&["--no-outputs", "--no-labels"]).resolve(&file(true), &display());
+        assert!(!off.outputs);
+        assert!(!off.settings.theme.labels);
+
+        // With no flag the file decides, and with no file either, the default.
+        assert!(!args(&[]).resolve(&file(false), &display()).outputs);
+        assert!(args(&[]).resolve(&Config::default(), &display()).outputs);
+    }
 }

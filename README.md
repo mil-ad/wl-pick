@@ -36,7 +36,8 @@ is the one thing the rofi version had that this doesn't — see the roadmap.
 
 ```
 wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
-        [--no-outputs] [--hide-labels] [--font FAMILY] [--font-size PX]
+        [--outputs|--no-outputs] [--labels|--no-labels]
+        [--font FAMILY] [--font-size PX]
         [--timeout SECS] [--verbose]
 ```
 
@@ -44,8 +45,10 @@ wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
 - `--live all|current|none` which tiles keep updating (default `all`; displays
   are always a single snapshot)
 - `--fps N` cap on live updates per tile per second (default 12)
-- `--no-outputs` windows only; displays are included as tiles by default
-- `--hide-labels` draws an icon-only grid
+- `--outputs` / `--no-outputs` whether whole displays are tiles too (default
+  on). Both directions exist so either can override the config file
+- `--labels` / `--no-labels` whether a label is drawn under each thumbnail
+  (default on); `--hide-labels` is the old spelling and still works
 - `--font FAMILY` label font family (default: the system monospace font)
 - `--font-size PX` label size in logical px
 - `--config PATH` config file (default `~/.config/wl-pick/config`)
