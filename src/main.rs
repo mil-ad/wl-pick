@@ -76,9 +76,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     // One IPC conversation: the window list, and the displays the grid sizes
     // itself against. It is closed again before the overlay maps.
     let (targets, opts) = {
-        let mut sway = swayipc::Connection::new().map_err(|e| {
-            format!("cannot reach sway ({e}); wl-pick reads the window list from its IPC socket")
-        })?;
+        let mut sway = sway::connect()?;
         // The displays come first: the grid is sized against the one it will
         // appear on, so every percentage in the config resolves per monitor.
         let displays = sway::displays(&mut sway)?;

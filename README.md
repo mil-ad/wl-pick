@@ -227,6 +227,12 @@ only sway is tested. sway is also the source of truth for the window list, over
 its IPC socket, which is the one thing that would need replacing to run
 elsewhere (`ext-foreign-toplevel-list-v1` already reports app id and title).
 
+The socket is found from `SWAYSOCK`/`I3SOCK` when those point at something that
+exists, and otherwise by looking for the running sway's socket in
+`$XDG_RUNTIME_DIR`. Inheriting a stale path is easy — any process that outlives
+the sway that started it hands one to every shell it spawns — and a picker on a
+keybinding should not be the thing that notices.
+
 Known upstream issue: holding per-toplevel capture sessions open makes windows
 blurry on **fractionally scaled** outputs
 ([sway#9113](https://github.com/swaywm/sway/issues/9113)). Integer scales are
