@@ -147,7 +147,7 @@ impl Ending {
             Ending::Picked => "picked",
             Ending::Cancelled => "cancelled",
             Ending::Closed => "the compositor closed the overlay",
-            Ending::Unfocused => "lost the keyboard to another surface",
+            Ending::Unfocused => "another surface holds the keyboard",
         }
     }
 }

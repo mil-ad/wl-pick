@@ -8,8 +8,8 @@ picker for the desktop portal. The difference is that no thumbnails
 exist: each window is captured straight into a `wl_shm` buffer that is handed to
 its own `wl_subsurface`, and `wp_viewporter` tells the compositor which rectangle
 to scale it into. There is no image encoding, no scaler, and no full-resolution
-bitmap in this process — which is also why it appears in about 60 ms and holds
-~18 MB of RSS however many windows are open.
+bitmap in this process — which is also why it appears in about 60 ms and stays
+around 6 MB resident (peaking near 18 MB) however many windows are open.
 
 ```
 sway-tree       0.6ms     window list + con_ids over sway IPC

@@ -168,29 +168,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     conn.flush()?;
     phases.mark("mapped");
 
-    // The keyboard grab is what makes the overlay usable, so losing it for
-    // good ends the run: that is how a second wl-pick, started from the same
-    // keybinding, replaces the first instead of leaving it stranded on screen.
-    // A leave only counts once it has failed to come back, because sway also
-    // cycles focus off and on in a single batch as the pointer crosses us.
-    loop {
-        queue.blocking_dispatch(&mut app)?;
-        if !app.finished()
-            && !app.focused
-            && !pump_for(
-                &conn,
-                &mut queue,
-                &mut app,
-                |a| a.focused || a.finished(),
-                REFOCUS_GRACE,
-            )?
-        {
-            app.ending = Ending::Unfocused;
-        }
-        if app.finished() {
-            break;
-        }
-    }
+    pump_interactive(&conn, &mut queue, &mut app)?;
     if opts.verbose {
         app.report(start.elapsed());
     }
@@ -208,6 +186,37 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Run the overlay until the user picks or cancels, or the keyboard goes away.
+///
+/// The grab is what makes the overlay usable, so losing it for good ends the
+/// run: that is how a second wl-pick, started from the same keybinding,
+/// replaces the first instead of leaving it stranded on screen. For *good*,
+/// because sway also cycles focus off and straight back on in a single batch as
+/// the pointer crosses the surface, so a leave is believed only once it has
+/// failed to come back.
+fn pump_interactive(
+    conn: &Connection,
+    queue: &mut EventQueue<App>,
+    app: &mut App,
+) -> Result<(), Box<dyn Error>> {
+    while !app.finished() {
+        queue.blocking_dispatch(app)?;
+        if app.finished() || app.focused {
+            continue;
+        }
+        if !pump_for(
+            conn,
+            queue,
+            app,
+            |a| a.focused || a.finished(),
+            REFOCUS_GRACE,
+        )? {
+            app.ending = Ending::Unfocused;
+        }
+    }
+    Ok(())
 }
 
 /// Run the event loop until `done`, or until `limit` has passed. Returns

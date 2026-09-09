@@ -1,8 +1,8 @@
 //! Labels.
 //!
-//! Building a font system and rasterising the first glyphs costs ~55ms, which is
-//! almost exactly the window the compositor spends copying window pixels back
-//! for us. So all of it happens on a worker thread started before the captures
+//! Building a font system and rasterising the first glyphs costs ~55ms, about
+//! what the compositor spends copying window pixels back for a handful of
+//! windows. So all of it happens on a worker thread started before the captures
 //! and joined after them: by the time anything is drawn, every label is shaped
 //! and its glyphs are already in the cache, and painting one costs ~0.1ms.
 //!
@@ -119,18 +119,18 @@ impl Choice {
             .stretch(self.stretch)
     }
 
-    /// How to describe what was used, in the shape the request was written in.
-    fn describe(&self) -> String {
-        let mut out = self.family.clone();
+    /// The name of what was chosen, in the shape a font name is written in.
+    fn name(&self) -> String {
+        // Weight before width, the way fonts name themselves. A default value
+        // adds nothing: "Berkeley Mono", not "Berkeley Mono Regular Normal".
+        let mut parts = vec![self.family.as_str()];
         if self.weight != Weight::NORMAL {
-            out.push(' ');
-            out.push_str(weight_name(self.weight));
+            parts.extend(spelling(WEIGHTS, self.weight));
         }
         if self.stretch != Stretch::Normal {
-            out.push(' ');
-            out.push_str(stretch_name(self.stretch));
+            parts.extend(spelling(WIDTHS, self.stretch));
         }
-        out
+        parts.join(" ")
     }
 }
 
@@ -187,15 +187,14 @@ fn read_style(words: &[&str], choice: &mut Choice) -> bool {
 
 /// Read one word as a weight or a width, and apply it.
 fn apply_style(word: &str, choice: &mut Choice) -> bool {
-    if let Some(weight) = weight_from(word) {
+    if let Some(weight) = lookup(WEIGHTS, word) {
         choice.weight = weight;
-        true
-    } else if let Some(stretch) = stretch_from(word) {
+    } else if let Some(stretch) = lookup(WIDTHS, word) {
         choice.stretch = stretch;
-        true
     } else {
-        false
+        return false;
     }
+    true
 }
 
 /// Style words as fonts spell them, joined or spaced, in any case.
@@ -206,61 +205,55 @@ fn normalise(word: &str) -> String {
         .collect()
 }
 
-fn weight_from(word: &str) -> Option<Weight> {
-    Some(match normalise(word).as_str() {
-        "thin" | "hairline" => Weight::THIN,
-        "extralight" | "ultralight" => Weight::EXTRA_LIGHT,
-        "light" => Weight::LIGHT,
-        "regular" | "normal" | "book" => Weight::NORMAL,
-        "medium" => Weight::MEDIUM,
-        "semibold" | "demibold" => Weight::SEMIBOLD,
-        "bold" => Weight::BOLD,
-        "extrabold" | "ultrabold" => Weight::EXTRA_BOLD,
-        "black" | "heavy" => Weight::BLACK,
-        _ => return None,
-    })
+/// Weight words as fonts spell them. The first spelling of each value is the
+/// one used when naming a weight back, so canonical spellings come first.
+const WEIGHTS: &[(&str, Weight)] = &[
+    ("Thin", Weight::THIN),
+    ("Hairline", Weight::THIN),
+    ("ExtraLight", Weight::EXTRA_LIGHT),
+    ("UltraLight", Weight::EXTRA_LIGHT),
+    ("Light", Weight::LIGHT),
+    ("Regular", Weight::NORMAL),
+    ("Normal", Weight::NORMAL),
+    ("Book", Weight::NORMAL),
+    ("Medium", Weight::MEDIUM),
+    ("SemiBold", Weight::SEMIBOLD),
+    ("DemiBold", Weight::SEMIBOLD),
+    ("Bold", Weight::BOLD),
+    ("ExtraBold", Weight::EXTRA_BOLD),
+    ("UltraBold", Weight::EXTRA_BOLD),
+    ("Black", Weight::BLACK),
+    ("Heavy", Weight::BLACK),
+];
+
+/// Width words, likewise. fontdb calls this a stretch.
+const WIDTHS: &[(&str, Stretch)] = &[
+    ("UltraCondensed", Stretch::UltraCondensed),
+    ("ExtraCondensed", Stretch::ExtraCondensed),
+    ("Condensed", Stretch::Condensed),
+    ("SemiCondensed", Stretch::SemiCondensed),
+    ("Normal", Stretch::Normal),
+    ("SemiExpanded", Stretch::SemiExpanded),
+    ("Expanded", Stretch::Expanded),
+    ("ExtraExpanded", Stretch::ExtraExpanded),
+    ("UltraExpanded", Stretch::UltraExpanded),
+];
+
+/// What `word` means, whatever way it is spelled.
+fn lookup<T: Copy>(table: &[(&str, T)], word: &str) -> Option<T> {
+    let word = normalise(word);
+    table
+        .iter()
+        .find(|(spelling, _)| normalise(spelling) == word)
+        .map(|(_, value)| *value)
 }
 
-fn weight_name(weight: Weight) -> &'static str {
-    match weight {
-        Weight::THIN => "Thin",
-        Weight::EXTRA_LIGHT => "ExtraLight",
-        Weight::LIGHT => "Light",
-        Weight::MEDIUM => "Medium",
-        Weight::SEMIBOLD => "SemiBold",
-        Weight::BOLD => "Bold",
-        Weight::EXTRA_BOLD => "ExtraBold",
-        Weight::BLACK => "Black",
-        _ => "Regular",
-    }
-}
-
-fn stretch_from(word: &str) -> Option<Stretch> {
-    Some(match normalise(word).as_str() {
-        "ultracondensed" => Stretch::UltraCondensed,
-        "extracondensed" => Stretch::ExtraCondensed,
-        "condensed" => Stretch::Condensed,
-        "semicondensed" => Stretch::SemiCondensed,
-        "semiexpanded" => Stretch::SemiExpanded,
-        "expanded" => Stretch::Expanded,
-        "extraexpanded" => Stretch::ExtraExpanded,
-        "ultraexpanded" => Stretch::UltraExpanded,
-        _ => return None,
-    })
-}
-
-fn stretch_name(stretch: Stretch) -> &'static str {
-    match stretch {
-        Stretch::UltraCondensed => "UltraCondensed",
-        Stretch::ExtraCondensed => "ExtraCondensed",
-        Stretch::Condensed => "Condensed",
-        Stretch::SemiCondensed => "SemiCondensed",
-        Stretch::Normal => "Normal",
-        Stretch::SemiExpanded => "SemiExpanded",
-        Stretch::Expanded => "Expanded",
-        Stretch::ExtraExpanded => "ExtraExpanded",
-        Stretch::UltraExpanded => "UltraExpanded",
-    }
+/// How to spell `value`, for saying afterwards what was used.
+fn spelling<T: PartialEq>(table: &[(&'static str, T)], value: T) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(_, known)| *known == value)
+        .map(|(word, _)| *word)
 }
 
 /// What to shape the labels with, given what was asked for.
@@ -336,7 +329,7 @@ fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f
         cache,
         lines,
         // What was actually used, not what was asked for.
-        family: choice.describe(),
+        family: choice.name(),
     }
 }
 
@@ -482,14 +475,14 @@ mod tests {
         assert_eq!(choice.family, "Berkeley Mono");
         assert_eq!(choice.weight, Weight::MEDIUM);
         assert_eq!(choice.stretch, Stretch::SemiCondensed);
-        assert_eq!(choice.describe(), "Berkeley Mono Medium SemiCondensed");
+        assert_eq!(choice.name(), "Berkeley Mono Medium SemiCondensed");
     }
 
     #[test]
     fn a_plain_family_keeps_its_defaults() {
         let choice = split_request("Berkeley Mono", db(&["Berkeley Mono"])).expect("resolves");
         assert_eq!(choice, Choice::plain("Berkeley Mono"));
-        assert_eq!(choice.describe(), "Berkeley Mono");
+        assert_eq!(choice.name(), "Berkeley Mono");
     }
 
     #[test]

@@ -22,9 +22,8 @@ usage: wl-pick [options]
   --fps N                   cap on live updates per tile per second [12]
   --outputs, --no-outputs   include whole displays as tiles [yes]
   --labels, --no-labels     a label under each thumbnail [yes]
-  --font NAME               label font: a family, optionally followed by a
-                            style, as in 'Iosevka Medium Condensed'
-                            [the system monospace font]
+  --font NAME               label font family, optionally with a style, as
+                            in 'Iosevka Medium Condensed' [system monospace]
   --font-size PX            label size in logical px [13.3]
   --timeout SECS            exit anyway after SECS, in case the keyboard
                             grab ever traps you [off]

@@ -4,6 +4,9 @@
 //!
 //! Acting on the choice is deliberately not here: wl-pick reports what was picked
 //! and the caller decides what that means.
+//!
+//! Finding the IPC socket also lives here, because the environment cannot be
+//! trusted to say where it is.
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -27,30 +30,28 @@ pub fn connect() -> Result<Connection, String> {
     // through swayipc's own lookup instead would spawn `sway
     // --get-socketpath` whenever the variables are unset, which prints a
     // complaint of its own before we can say anything useful.
-    if let Some(conn) = env_socket().and_then(|p| UnixStream::connect(p).ok()) {
-        return Ok(Connection::from(conn));
+    if let Some(stream) = env_socket().and_then(|path| UnixStream::connect(path).ok()) {
+        return Ok(Connection::from(stream));
     }
-    let live = live_sockets();
-    let [path] = live.as_slice() else {
-        return Err(if live.is_empty() {
+    match live_sockets().as_slice() {
+        [path] => UnixStream::connect(path)
+            .map(Connection::from)
+            .map_err(|e| format!("cannot reach sway on {} ({e})", path.display())),
+        [] => Err(
             "cannot reach sway; wl-pick reads the window list from its IPC \
-             socket, and no running sway has one"
-                .to_string()
-        } else {
-            // Several live compositors, so any choice would be a guess: a
-            // nested sway is a real thing to be running.
-            format!(
-                "several sway sockets to choose from ({}); set SWAYSOCK to the one you mean",
-                live.iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        });
-    };
-    UnixStream::connect(path)
-        .map(Connection::from)
-        .map_err(|e| format!("cannot reach sway on {} ({e})", path.display()))
+                   socket, and no running sway has one"
+                .to_string(),
+        ),
+        // Several live compositors, so any choice would be a guess: a nested
+        // sway is a real thing to be running.
+        many => Err(format!(
+            "several sway sockets to choose from ({}); set SWAYSOCK to the one you mean",
+            many.iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// The pid out of a `sway-ipc.<uid>.<pid>.sock` name, and nothing else.
