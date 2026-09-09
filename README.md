@@ -37,7 +37,7 @@ is the one thing the rofi version had that this doesn't — see the roadmap.
 ```
 wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
         [--outputs|--no-outputs] [--labels|--no-labels]
-        [--font FAMILY] [--font-size PX]
+        [--font NAME] [--font-size PX]
         [--timeout SECS] [--verbose]
 ```
 
@@ -49,7 +49,8 @@ wl-pick [--format tsv|json|portal] [--live all|current|none] [--fps N]
   on). Both directions exist so either can override the config file
 - `--labels` / `--no-labels` whether a label is drawn under each thumbnail
   (default on); `--hide-labels` is the old spelling and still works
-- `--font FAMILY` label font family (default: the system monospace font)
+- `--font NAME` label font: a family, optionally followed by a style, as in
+  `"Iosevka Medium Condensed"` (default: the system monospace font)
 - `--font-size PX` label size in logical px
 - `--config PATH` config file (default `~/.config/wl-pick/config`)
 - `--timeout SECS` exits after a deadline, in case the keyboard grab ever traps
@@ -212,8 +213,21 @@ monospace` answers, which is what the rest of the desktop uses. (cosmic-text's
 own generic resolves through a built-in preference that is usually not
 installed, and then lands on an arbitrary face, so it is asked directly
 instead; if fontconfig isn't available, a short list of common distribution
-defaults is tried.) `--font` names a family instead, and `--verbose` reports
-which family the labels were actually shaped with.
+defaults is tried.)
+
+`--font` and the `font` setting name a font instead. Fonts are usually known by
+their full display name — `Berkeley Mono Medium SemiCondensed` is what
+`fc-match` prints and what a font menu shows — but only `Berkeley Mono` is the
+*family*; the rest names a face within it. Both spellings work: the name is
+split into the longest leading part that is a real family and a style read off
+the remainder, so weights (`Light`, `Medium`, `SemiBold`, …) and widths
+(`Condensed`, `SemiCondensed`, `Expanded`, …) are understood, joined or spaced,
+in any case. A family whose own name ends in a style word, like `Fira Code
+Light`, still wins over reading that word as a style.
+
+A name that matches nothing says so on stderr and falls back to the system
+monospace font, rather than shaping in an arbitrary face while claiming to have
+used what you asked for. `--verbose` reports the font actually used.
 
 Naming a family scans your own font directories first because they are small;
 the full system scan (~37ms) happens only if it isn't found there. An unknown

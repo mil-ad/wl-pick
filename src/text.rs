@@ -12,7 +12,8 @@
 use std::thread::{self, JoinHandle};
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap, fontdb,
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Stretch, SwashCache, Weight,
+    Wrap, fontdb,
 };
 
 use crate::shm::Painter;
@@ -66,7 +67,7 @@ fn font_db(family: &str) -> FontSystem {
             db.load_fonts_dir(format!("{home}/.fonts"));
             db.load_fonts_dir(format!("{home}/.local/share/fonts"));
         }
-        if has_family(&db, family) {
+        if interpret(&db, family).is_some() {
             // The locale only orders CJK fallbacks; labels are ids and titles.
             return FontSystem::new_with_locale_and_db("en-US".to_string(), db);
         }
@@ -79,31 +80,224 @@ fn is_generic(family: &str) -> bool {
     family.eq_ignore_ascii_case(SYSTEM_MONO)
 }
 
-fn has_family(db: &fontdb::Database, family: &str) -> bool {
+/// The database's own spelling of `want`, matched the way fontconfig matches:
+/// without caring about case.
+fn family_named(db: &fontdb::Database, want: &str) -> Option<String> {
     db.faces()
-        .any(|f| f.families.iter().any(|(name, _)| name == family))
+        .flat_map(|face| face.families.iter())
+        .find(|(name, _)| name.eq_ignore_ascii_case(want))
+        .map(|(name, _)| name.clone())
 }
 
-/// Turn the generic default into a real family name.
+/// A family name, and the face within it to ask for.
 ///
-/// cosmic-text's own generic resolves through fontdb's built-in preference
-/// ("FreeMono"), which is usually absent and then lands on an arbitrary face — so
-/// ask fontconfig instead, since that is what the rest of the desktop uses. A
-/// named family passes through untouched; if it turns out to be missing,
-/// cosmic-text falls back on its own.
-fn resolve_family(db: &fontdb::Database, family: &str) -> String {
-    if !is_generic(family) {
-        return family.to_string();
+/// Fonts are commonly known by their full display name -- "Berkeley Mono Medium
+/// SemiCondensed" is what `fc-match` prints and what a font menu shows -- but
+/// only "Berkeley Mono" is the family; the rest names a face inside it. Asking
+/// fontdb for the whole string matches nothing, so a request is split into the
+/// longest part that is a real family and a style read off the remainder.
+#[derive(Debug, PartialEq)]
+struct Choice {
+    family: String,
+    weight: Weight,
+    stretch: Stretch,
+}
+
+impl Choice {
+    fn plain(family: &str) -> Self {
+        Self {
+            family: family.to_string(),
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+        }
     }
+
+    fn attrs(&self) -> Attrs<'_> {
+        Attrs::new()
+            .family(Family::Name(&self.family))
+            .weight(self.weight)
+            .stretch(self.stretch)
+    }
+
+    /// How to describe what was used, in the shape the request was written in.
+    fn describe(&self) -> String {
+        let mut out = self.family.clone();
+        if self.weight != Weight::NORMAL {
+            out.push(' ');
+            out.push_str(weight_name(self.weight));
+        }
+        if self.stretch != Stretch::Normal {
+            out.push(' ');
+            out.push_str(stretch_name(self.stretch));
+        }
+        out
+    }
+}
+
+/// What `request` names, as a family the database has plus a style.
+fn interpret(db: &fontdb::Database, request: &str) -> Option<Choice> {
+    split_request(request, |name| family_named(db, name))
+}
+
+/// Split `request` into the longest leading part that names a family and a
+/// style read off the words after it. `lookup` answers with the database's own
+/// spelling of a family, or `None` if it has no such family.
+///
+/// Longest first, so a family whose own name ends in a style word -- "Fira Code
+/// Light" is a family in its own right -- wins over reading that word as a
+/// style. A trailing word that is neither a weight nor a width means this
+/// reading of the name is wrong, so the search keeps shortening rather than
+/// quietly ignoring it.
+fn split_request(request: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<Choice> {
+    let words: Vec<&str> = request.split_whitespace().collect();
+    for split in (1..=words.len()).rev() {
+        let Some(family) = lookup(&words[..split].join(" ")) else {
+            continue;
+        };
+        let mut choice = Choice::plain(&family);
+        if read_style(&words[split..], &mut choice) {
+            return Some(choice);
+        }
+    }
+    None
+}
+
+/// Apply the style `words` to `choice`, or report that one of them is not a
+/// style at all.
+fn read_style(words: &[&str], choice: &mut Choice) -> bool {
+    let mut i = 0;
+    while i < words.len() {
+        // Fonts spell a two-part style either way round -- "ExtraLight" and
+        // "Extra Light" are the same face -- so each pair of words gets a look
+        // before either is read on its own.
+        let pair = words.get(i..i + 2).map(|two| two.concat());
+        if pair
+            .as_deref()
+            .is_some_and(|pair| apply_style(pair, choice))
+        {
+            i += 2;
+        } else if apply_style(words[i], choice) {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Read one word as a weight or a width, and apply it.
+fn apply_style(word: &str, choice: &mut Choice) -> bool {
+    if let Some(weight) = weight_from(word) {
+        choice.weight = weight;
+        true
+    } else if let Some(stretch) = stretch_from(word) {
+        choice.stretch = stretch;
+        true
+    } else {
+        false
+    }
+}
+
+/// Style words as fonts spell them, joined or spaced, in any case.
+fn normalise(word: &str) -> String {
+    word.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn weight_from(word: &str) -> Option<Weight> {
+    Some(match normalise(word).as_str() {
+        "thin" | "hairline" => Weight::THIN,
+        "extralight" | "ultralight" => Weight::EXTRA_LIGHT,
+        "light" => Weight::LIGHT,
+        "regular" | "normal" | "book" => Weight::NORMAL,
+        "medium" => Weight::MEDIUM,
+        "semibold" | "demibold" => Weight::SEMIBOLD,
+        "bold" => Weight::BOLD,
+        "extrabold" | "ultrabold" => Weight::EXTRA_BOLD,
+        "black" | "heavy" => Weight::BLACK,
+        _ => return None,
+    })
+}
+
+fn weight_name(weight: Weight) -> &'static str {
+    match weight {
+        Weight::THIN => "Thin",
+        Weight::EXTRA_LIGHT => "ExtraLight",
+        Weight::LIGHT => "Light",
+        Weight::MEDIUM => "Medium",
+        Weight::SEMIBOLD => "SemiBold",
+        Weight::BOLD => "Bold",
+        Weight::EXTRA_BOLD => "ExtraBold",
+        Weight::BLACK => "Black",
+        _ => "Regular",
+    }
+}
+
+fn stretch_from(word: &str) -> Option<Stretch> {
+    Some(match normalise(word).as_str() {
+        "ultracondensed" => Stretch::UltraCondensed,
+        "extracondensed" => Stretch::ExtraCondensed,
+        "condensed" => Stretch::Condensed,
+        "semicondensed" => Stretch::SemiCondensed,
+        "semiexpanded" => Stretch::SemiExpanded,
+        "expanded" => Stretch::Expanded,
+        "extraexpanded" => Stretch::ExtraExpanded,
+        "ultraexpanded" => Stretch::UltraExpanded,
+        _ => return None,
+    })
+}
+
+fn stretch_name(stretch: Stretch) -> &'static str {
+    match stretch {
+        Stretch::UltraCondensed => "UltraCondensed",
+        Stretch::ExtraCondensed => "ExtraCondensed",
+        Stretch::Condensed => "Condensed",
+        Stretch::SemiCondensed => "SemiCondensed",
+        Stretch::Normal => "Normal",
+        Stretch::SemiExpanded => "SemiExpanded",
+        Stretch::Expanded => "Expanded",
+        Stretch::ExtraExpanded => "ExtraExpanded",
+        Stretch::UltraExpanded => "UltraExpanded",
+    }
+}
+
+/// What to shape the labels with, given what was asked for.
+///
+/// A request that names nothing at all is worth complaining about: silently
+/// drawing in some other font looks like the setting was ignored, which is
+/// exactly how it reads from the outside.
+fn choose(db: &fontdb::Database, request: &str) -> Choice {
+    if !is_generic(request) {
+        if let Some(choice) = interpret(db, request) {
+            return choice;
+        }
+        let fallback = system_mono(db);
+        eprintln!(
+            "wl-pick: no font matching {request:?}, using {:?}; \
+             `fc-match -f '%{{family}}\\n' {request:?}` names the family",
+            fallback.family
+        );
+        return fallback;
+    }
+    system_mono(db)
+}
+
+/// The generic default, resolved to a real family. cosmic-text's own generic
+/// goes through fontdb's built-in preference ("FreeMono"), which is usually
+/// absent and then lands on an arbitrary face — so ask fontconfig instead,
+/// since that is what the rest of the desktop uses.
+fn system_mono(db: &fontdb::Database) -> Choice {
     fc_match_mono()
-        .filter(|name| has_family(db, name))
+        .filter(|name| family_named(db, name).is_some())
         .or_else(|| {
             MONO_CANDIDATES
                 .iter()
-                .find(|name| has_family(db, name))
+                .find(|name| family_named(db, name).is_some())
                 .map(|name| name.to_string())
         })
-        .unwrap_or_else(|| family.to_string())
+        .map_or_else(|| Choice::plain(SYSTEM_MONO), |name| Choice::plain(&name))
 }
 
 /// What fontconfig says "monospace" means here. A system without the fontconfig
@@ -122,8 +316,8 @@ fn fc_match_mono() -> Option<String> {
 fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f32) -> Labels {
     let mut fs = font_db(&family);
     let mut cache = SwashCache::new();
-    let family = resolve_family(fs.db(), &family);
-    let attrs = Attrs::new().family(Family::Name(&family));
+    let choice = choose(fs.db(), &family);
+    let attrs = choice.attrs();
     let metrics = Metrics::new(font_px, line_h);
 
     let mut lines = Vec::with_capacity(texts.len());
@@ -141,7 +335,8 @@ fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f
         fs,
         cache,
         lines,
-        family,
+        // What was actually used, not what was asked for.
+        family: choice.describe(),
     }
 }
 
@@ -242,14 +437,108 @@ mod tests {
     #[test]
     fn the_generic_default_resolves_to_a_real_monospace_family() {
         let fs = font_db(SYSTEM_MONO);
-        let resolved = resolve_family(fs.db(), SYSTEM_MONO);
-        assert_ne!(resolved, SYSTEM_MONO, "should have named a real family");
-        assert!(
-            has_family(fs.db(), &resolved),
-            "{resolved:?} is not in the database"
+        let choice = choose(fs.db(), SYSTEM_MONO);
+        assert_ne!(
+            choice.family, SYSTEM_MONO,
+            "should have named a real family"
         );
-        // A named family passes through, present or not.
-        assert_eq!(resolve_family(fs.db(), "Some Font"), "Some Font");
+        assert!(
+            family_named(fs.db(), &choice.family).is_some(),
+            "{:?} is not in the database",
+            choice.family
+        );
+    }
+
+    #[test]
+    fn a_family_that_is_not_installed_falls_back_to_the_default() {
+        // This used to pass the name straight through to cosmic-text, which
+        // shaped in whatever it liked while --verbose reported the name that
+        // had been asked for -- so a font setting that did nothing looked
+        // exactly like one that worked.
+        let fs = font_db(SYSTEM_MONO);
+        let asked = choose(fs.db(), "No Such Family At All");
+        assert_eq!(asked, choose(fs.db(), SYSTEM_MONO), "should be the default");
+        assert_ne!(asked.family, "No Such Family At All");
+    }
+
+    /// A database that knows exactly these families.
+    fn db(families: &[&'static str]) -> impl Fn(&str) -> Option<String> {
+        let families: Vec<&str> = families.to_vec();
+        move |want| {
+            families
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(want))
+                .map(|name| name.to_string())
+        }
+    }
+
+    #[test]
+    fn a_full_font_name_splits_into_family_and_style() {
+        // What fc-match prints and what a font menu shows: only the first part
+        // of it is the family, which is why asking fontdb for the whole string
+        // matched nothing.
+        let choice = split_request("Berkeley Mono Medium SemiCondensed", db(&["Berkeley Mono"]))
+            .expect("should resolve");
+        assert_eq!(choice.family, "Berkeley Mono");
+        assert_eq!(choice.weight, Weight::MEDIUM);
+        assert_eq!(choice.stretch, Stretch::SemiCondensed);
+        assert_eq!(choice.describe(), "Berkeley Mono Medium SemiCondensed");
+    }
+
+    #[test]
+    fn a_plain_family_keeps_its_defaults() {
+        let choice = split_request("Berkeley Mono", db(&["Berkeley Mono"])).expect("resolves");
+        assert_eq!(choice, Choice::plain("Berkeley Mono"));
+        assert_eq!(choice.describe(), "Berkeley Mono");
+    }
+
+    #[test]
+    fn a_family_may_end_in_a_style_word() {
+        // "Fira Code Light" is a family in its own right, so it must win over
+        // reading "Light" as the weight of "Fira Code".
+        let choice = split_request("Fira Code Light", db(&["Fira Code", "Fira Code Light"]))
+            .expect("resolves");
+        assert_eq!(choice.family, "Fira Code Light");
+        assert_eq!(choice.weight, Weight::NORMAL);
+    }
+
+    #[test]
+    fn style_words_are_spelled_many_ways() {
+        let cases = [
+            ("Iosevka demibold", Weight::SEMIBOLD, Stretch::Normal),
+            ("Iosevka Extra Light", Weight::EXTRA_LIGHT, Stretch::Normal),
+            (
+                "Iosevka ULTRACONDENSED",
+                Weight::NORMAL,
+                Stretch::UltraCondensed,
+            ),
+            ("Iosevka Bold Condensed", Weight::BOLD, Stretch::Condensed),
+        ];
+        for (request, weight, stretch) in cases {
+            let choice = split_request(request, db(&["Iosevka"]))
+                .unwrap_or_else(|| panic!("{request:?} should resolve"));
+            assert_eq!(choice.family, "Iosevka", "{request:?}");
+            assert_eq!(choice.weight, weight, "{request:?}");
+            assert_eq!(choice.stretch, stretch, "{request:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_means_nothing_resolves_to_nothing() {
+        // The caller warns and falls back. Quietly dropping the word it cannot
+        // read would shape in the wrong face and say nothing about it.
+        let known = db(&["Berkeley Mono"]);
+        assert_eq!(split_request("Berkeley Monospace Bold", &known), None);
+        assert_eq!(split_request("Berkeley Mono Nonsense", &known), None);
+        assert_eq!(split_request("Comic Sans", &known), None);
+        assert_eq!(split_request("", &known), None);
+    }
+
+    #[test]
+    fn case_does_not_matter_but_the_font_keeps_its_own_spelling() {
+        let choice = split_request("berkeley mono bold", db(&["Berkeley Mono"])).expect("resolves");
+        assert_eq!(choice.family, "Berkeley Mono", "the database's spelling");
+        assert_eq!(choice.weight, Weight::BOLD);
     }
 
     #[test]

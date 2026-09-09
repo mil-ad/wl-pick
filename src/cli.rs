@@ -22,7 +22,9 @@ usage: wl-pick [options]
   --fps N                   cap on live updates per tile per second [12]
   --outputs, --no-outputs   include whole displays as tiles [yes]
   --labels, --no-labels     a label under each thumbnail [yes]
-  --font FAMILY             label font family [the system monospace font]
+  --font NAME               label font: a family, optionally followed by a
+                            style, as in 'Iosevka Medium Condensed'
+                            [the system monospace font]
   --font-size PX            label size in logical px [13.3]
   --timeout SECS            exit anyway after SECS, in case the keyboard
                             grab ever traps you [off]
@@ -57,7 +59,7 @@ config:
     max-rows       = 4            # so their size never depends on how many
                                   # windows are open; further rows scroll
 
-    font           = monospace    # also --font
+    font           = monospace    # a family, optionally with a style
     font-size      = 13.3
     labels         = yes
     outputs        = yes          # include whole displays as tiles
@@ -228,7 +230,7 @@ fn parse(it: impl Iterator<Item = String>) -> Result<Args, String> {
                 let v = it.next().ok_or("--fps needs a number")?;
                 args.fps = Some(v.parse().map_err(|_| format!("bad --fps: {v}"))?);
             }
-            "--font" => args.font = Some(it.next().ok_or("--font needs a family name")?),
+            "--font" => args.font = Some(it.next().ok_or("--font needs a font name")?),
             "--font-size" => {
                 let v = it.next().ok_or("--font-size needs px")?;
                 args.font_size = Some(v.parse().map_err(|_| format!("bad --font-size: {v}"))?);
