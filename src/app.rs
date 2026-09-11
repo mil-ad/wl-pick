@@ -94,6 +94,11 @@ pub struct App {
     /// cursor instead.
     pub(crate) hover: Option<overlay::Hover>,
     pub(crate) pressed: Option<usize>,
+    /// Scroll summed since the last selection move, and whether the source is
+    /// a finger. A wheel notch is one move; a touchpad sends a stream of small
+    /// values for a single flick, so those are added up rather than counted.
+    pub(crate) scroll_acc: f64,
+    pub(crate) scroll_finger: bool,
     /// Set the cursor shape without shipping a cursor theme. Optional: without
     /// it the pointer keeps whatever shape it had over the window below.
     pub(crate) cursor_shape: Option<WpCursorShapeManagerV1>,
@@ -103,6 +108,11 @@ pub struct App {
     pub(crate) surface: Option<WlSurface>,
     pub(crate) chrome: Option<shm::Chrome>,
     pub(crate) chrome_buffers: Vec<WlBuffer>,
+    /// Which chrome buffers the compositor still holds, and whether a repaint
+    /// was dropped because both were. Painting into a buffer that is still
+    /// being read tears what is on screen, so taking turns is not enough.
+    pub(crate) chrome_busy: [bool; shm::Chrome::SLOTS],
+    pub(crate) repaint_due: bool,
     pub(crate) configured: bool,
 
     /// The display the overlay maps on, by name.
@@ -192,12 +202,16 @@ impl App {
             shift: false,
             hover: None,
             pressed: None,
+            scroll_acc: 0.0,
+            scroll_finger: false,
             cursor_shape: globals.bind(qh, 1..=2, ()).ok(),
             cursor_device: None,
             labels: None,
             surface: None,
             chrome: None,
             chrome_buffers: Vec::new(),
+            chrome_busy: [false; shm::Chrome::SLOTS],
+            repaint_due: false,
             configured: false,
             output,
             ending: Ending::Running,
@@ -208,12 +222,9 @@ impl App {
         let _: ExtForeignToplevelListV1 = globals.bind(qh, 1..=1, ())?;
         // One wl_output per display, bound at v4 so it tells us its name.
         for global in globals.contents().clone_list() {
-            if global.interface == WlOutput::interface().name {
-                let version = global.version.min(4);
-                if version >= 4 {
-                    let output: WlOutput = globals.registry().bind(global.name, version, qh, ());
-                    app.outputs.push((output, String::new()));
-                }
+            if global.interface == WlOutput::interface().name && global.version >= 4 {
+                let output: WlOutput = globals.registry().bind(global.name, 4, qh, ());
+                app.outputs.push((output, String::new()));
             }
         }
         let _: WlSeat = globals.bind(qh, 1..=7, ())?;
@@ -382,8 +393,7 @@ delegate_noop!(App: ExtForeignToplevelImageCaptureSourceManagerV1);
 delegate_noop!(App: ExtImageCaptureSourceV1);
 delegate_noop!(App: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(App: ignore WlSurface);
-// The chrome's own buffers: two slots alternating on keypresses, so their
-// release timing does not matter.
 delegate_noop!(App: WpCursorShapeManagerV1);
 delegate_noop!(App: WpCursorShapeDeviceV1);
-delegate_noop!(App: ignore WlBuffer);
+// wl_buffer is listened to on both sides: capture.rs for the capture slots,
+// overlay.rs for the chrome's own.

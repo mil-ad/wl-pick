@@ -47,8 +47,8 @@ use config::Config;
 use target::Target;
 use theme::Layout;
 
-/// How long the phases before the overlay is interactive may take. Capture
-/// measures ~90ms for fourteen windows, so this is a wide margin around
+/// How long any one bounded wait before the overlay is interactive may take.
+/// Capture measures ~90ms for fourteen windows, so this is a wide margin around
 /// anything healthy, and only a stall reaches it.
 const STARTUP_BUDGET: Duration = Duration::from_secs(2);
 
@@ -91,7 +91,9 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         (targets, opts)
     };
     if targets.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        // Nothing was picked, so this exits the way a cancel does: the
+        // documented contract is 0 for a pick and 1 for anything else.
+        return Ok(ExitCode::FAILURE);
     }
     phases.mark("sway-tree");
 
@@ -222,11 +224,15 @@ fn pump_interactive(
 /// Run the event loop until `done`, or until `limit` has passed. Returns
 /// whether `done` came true in time.
 ///
-/// Every wait before the overlay is interactive is bounded, because a
-/// compositor is entitled to simply never answer. sway does exactly that for a
-/// capture request on a toplevel another client is already capturing: no frame,
-/// no `failed`, no `stopped`, just silence — and an unbounded wait on that is a
-/// picker with no window that has to be killed from another terminal.
+/// Every wait on a capture is bounded, because a compositor is entitled to
+/// simply never answer. sway does exactly that for a capture request on a
+/// toplevel another client is already capturing: no frame, no `failed`, no
+/// `stopped`, just silence — and an unbounded wait on that is a picker with no
+/// window that has to be killed from another terminal.
+///
+/// The roundtrips above are not bounded this way, so a compositor that stalls
+/// on the toplevel list or on a session's constraints still hangs us;
+/// `--timeout` is the only backstop there.
 fn pump_for(
     conn: &Connection,
     queue: &mut EventQueue<App>,

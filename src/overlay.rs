@@ -9,6 +9,7 @@ use std::error::Error;
 use std::os::fd::AsFd;
 
 use wayland_client::protocol::{
+    wl_buffer::{self, WlBuffer},
     wl_keyboard::{self, WlKeyboard},
     wl_pointer::{self, WlPointer},
     wl_seat::{self, WlSeat},
@@ -53,6 +54,11 @@ const KEY_PGDN: u32 = 109;
 /// evdev button code, as wl_pointer reports it.
 const BTN_LEFT: u32 = 0x110;
 
+/// How much continuous scroll makes one move. A wheel notch is one move
+/// outright; a touchpad reports a flick as a stream of small values, and one
+/// move per value would cross the whole grid in a single gesture.
+const FINGER_STEP: f64 = 15.0;
+
 /// Where the pointer is: the surface it entered, and the position within it.
 /// Tiles are subsurfaces, so the surface alone usually names a tile; the
 /// position is only needed over the chrome around them.
@@ -84,6 +90,10 @@ impl App {
             (),
         );
         layer.set_size(lw as u32, lh as u32);
+        // The grid is sized against the whole display, so it must not be laid
+        // out inside what a bar has reserved: with a panel on screen the
+        // compositor would otherwise grant less than was asked for.
+        layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         surface.set_buffer_scale(self.scale);
         surface.commit();
@@ -100,7 +110,7 @@ impl App {
                 shm::Chrome::stride(pw),
                 wl_shm::Format::Argb8888,
                 qh,
-                (),
+                slot,
             ));
         }
         pool.destroy();
@@ -116,7 +126,11 @@ impl App {
     /// Scaling stays the compositor's job: the capture buffer is attached as it
     /// is, and wp_viewporter names the rectangle to fit it into.
     pub fn sync_tiles(&mut self, qh: &QueueHandle<Self>) {
-        let parent = self.surface.clone().expect("show() runs first");
+        // A capture that lands before the overlay is mapped has nothing to be
+        // placed on yet; the pass after show() picks it up from `showing`.
+        let Some(parent) = self.surface.clone() else {
+            return;
+        };
         let scroll = self.scroll;
         for i in 0..self.tiles.len() {
             let Some(box_) = self.layout.tile(i as i32, scroll) else {
@@ -178,6 +192,13 @@ impl App {
 
     /// Repaint background, selection highlight, labels and border.
     pub fn paint(&mut self) {
+        // Never paint into a buffer the compositor is still reading. Both slots
+        // outstanding means this repaint waits for a release rather than
+        // tearing the one on screen; the release handler takes it then.
+        let Some(slot) = self.chrome_busy.iter().position(|busy| !busy) else {
+            self.repaint_due = true;
+            return;
+        };
         let (scale, sel, scroll) = (self.scale, self.sel, self.scroll);
         // Gather geometry before borrowing the chrome and the labels together.
         let elem = self
@@ -208,9 +229,8 @@ impl App {
         let Some(chrome) = self.chrome.as_mut() else {
             return;
         };
-        let slot = chrome.next_slot();
         let (cw, ch) = (chrome.w, chrome.h);
-        let mut p = chrome.painter();
+        let mut p = chrome.painter(slot);
         p.fill(bg);
         // The selection fills the whole element box, padding included — the same
         // thing rofi's element background does. It can be scrolled out of sight.
@@ -234,6 +254,8 @@ impl App {
         surface.attach(self.chrome_buffers.get(slot), 0, 0);
         surface.damage_buffer(0, 0, cw, ch);
         surface.commit();
+        self.chrome_busy[slot] = true;
+        self.repaint_due = false;
     }
 
     fn move_sel(&mut self, delta: i32, qh: &QueueHandle<Self>) {
@@ -245,11 +267,10 @@ impl App {
     }
 
     fn move_row(&mut self, rows: i32, qh: &QueueHandle<Self>) {
-        let n = self.tiles.len() as i32;
-        let target = self.sel as i32 + rows * self.layout.cols;
-        if target >= 0 && target < n {
-            self.select(target as usize, qh);
+        if self.tiles.is_empty() {
+            return;
         }
+        self.select(self.layout.step_row(self.sel, rows), qh);
     }
 
     /// Move the selection, scrolling the least that keeps it on screen. Every
@@ -263,6 +284,26 @@ impl App {
             self.sync_tiles(qh);
         }
         self.paint();
+    }
+
+    /// One notch of a wheel moves the selection; a touchpad's flick is summed
+    /// so that a gesture moves by about as much as it looks like it should.
+    fn scroll_by(&mut self, value: f64, qh: &QueueHandle<Self>) {
+        let step = if value > 0.0 { 1 } else { -1 };
+        if !self.scroll_finger {
+            self.move_sel(step, qh);
+            return;
+        }
+        // Turning round starts again, so a flick back does not have to undo
+        // what is left over from the last one.
+        if self.scroll_acc * value < 0.0 {
+            self.scroll_acc = 0.0;
+        }
+        self.scroll_acc += value;
+        while self.scroll_acc.abs() >= FINGER_STEP {
+            self.scroll_acc -= FINGER_STEP.copysign(self.scroll_acc);
+            self.move_sel(step, qh);
+        }
     }
 
     /// The tile under the pointer, if it is over one. A tile's own subsurface
@@ -390,7 +431,19 @@ impl Dispatch<WlKeyboard, ()> for App {
             // followed by enter on the same surface when the pointer crosses
             // it, so whether the grab is really gone is decided by the main
             // loop, once the event batch has been dispatched.
-            wl_keyboard::Event::Enter { .. } => app.focused = true,
+            //
+            // The grab arrives with the keys already down, which is the only
+            // place they can be read: a keybinding with Shift in it is still
+            // held when the overlay opens, and taking Shift from later events
+            // alone would make Shift+Tab move forwards.
+            wl_keyboard::Event::Enter { keys, .. } => {
+                app.focused = true;
+                app.shift = keys
+                    .chunks_exact(4)
+                    .filter_map(|k| k.try_into().ok())
+                    .map(u32::from_ne_bytes)
+                    .any(|k| k == KEY_LEFTSHIFT || k == KEY_RIGHTSHIFT);
+            }
             wl_keyboard::Event::Leave { .. } => app.focused = false,
             _ => {}
         }
@@ -445,10 +498,53 @@ impl Dispatch<WlPointer, ()> for App {
                 state: WEnum::Value(state),
                 ..
             } => app.click(state == wl_pointer::ButtonState::Pressed),
-            wl_pointer::Event::Axis { value, .. } => {
-                app.move_sel(if value > 0.0 { 1 } else { -1 }, qh)
+            // Which device is scrolling decides how a value reads, and
+            // sideways scroll is not a selection move at all.
+            wl_pointer::Event::AxisSource {
+                axis_source: WEnum::Value(source),
+            } => {
+                let finger = matches!(
+                    source,
+                    wl_pointer::AxisSource::Finger | wl_pointer::AxisSource::Continuous
+                );
+                // This arrives once per frame, not once per gesture, so only a
+                // change of device starts the sum again: clearing it every time
+                // would mean a touchpad never reached a whole step at all.
+                if finger != app.scroll_finger {
+                    app.scroll_acc = 0.0;
+                }
+                app.scroll_finger = finger;
             }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => app.scroll_by(value, qh),
+            wl_pointer::Event::AxisStop { .. } => app.scroll_acc = 0.0,
             _ => {}
+        }
+    }
+}
+
+/// The chrome's own buffers. Two slots are enough to always have one free, but
+/// only if the free one is the one the compositor has released — a repaint that
+/// found both outstanding is taken here instead.
+impl Dispatch<WlBuffer, usize> for App {
+    fn event(
+        app: &mut Self,
+        _: &WlBuffer,
+        event: wl_buffer::Event,
+        &slot: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            if let Some(busy) = app.chrome_busy.get_mut(slot) {
+                *busy = false;
+            }
+            if app.repaint_due {
+                app.paint();
+            }
         }
     }
 }

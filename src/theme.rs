@@ -169,6 +169,21 @@ impl Layout {
         i as i32 / self.cols
     }
 
+    /// The tile `rows` further down the grid, or up for a negative count.
+    ///
+    /// The row is what gets clamped, not the index: a jump landing past the end
+    /// still has somewhere to go. Refusing it instead is how PgDn stopped
+    /// working with rows still below, and `j` with a ragged last row in sight.
+    pub fn step_row(&self, sel: usize, rows: i32) -> usize {
+        if self.n == 0 {
+            return 0;
+        }
+        let (row, col) = (sel as i32 / self.cols, sel as i32 % self.cols);
+        let row = (row + rows).clamp(0, (self.n - 1) / self.cols);
+        // The last row may be ragged, so keeping the column can still overshoot.
+        (row * self.cols + col).min(self.n - 1) as usize
+    }
+
     /// Where the viewport must sit for tile `i` to be on screen, moving as
     /// little as possible from `scroll`.
     pub fn reveal(&self, i: usize, scroll: i32) -> i32 {
@@ -514,6 +529,33 @@ mod tests {
         assert_eq!(l.reveal(29, 0), l.max_scroll());
         // Coming back up scrolls the other way.
         assert_eq!(l.reveal(0, l.max_scroll()), 0);
+    }
+
+    #[test]
+    fn stepping_rows_reaches_the_last_ragged_row() {
+        // Four columns and four visible rows, so thirty tiles make eight rows
+        // of which the last holds two.
+        let l = Layout::new(&Theme::default(), 30, ROOMY);
+        assert_eq!((l.cols, l.rows, l.visible_rows), (4, 8, 4), "{l:?}");
+        // Down from the row above the last lands in it, even though keeping the
+        // column would be past the end: 26 + 4 is 30, and there are 30 tiles.
+        // Refusing to move at all is what left tiles 28 and 29 unreachable.
+        assert_eq!(l.step_row(26, 1), 29);
+        assert_eq!(l.step_row(27, 1), 29);
+        // A page down moves from anywhere, and stops on the last tile.
+        assert_eq!(l.step_row(0, l.visible_rows), 16);
+        assert_eq!(l.step_row(16, l.visible_rows), 28);
+        assert_eq!(
+            l.step_row(22, l.visible_rows),
+            29,
+            "clamped into a short row"
+        );
+        // The same upwards, which was stuck in exactly the same way.
+        assert_eq!(l.step_row(8, -l.visible_rows), 0);
+        assert_eq!(l.step_row(29, -1), 25);
+        // The edges hold: no row above the first, none below the last.
+        assert_eq!(l.step_row(2, -1), 2);
+        assert_eq!(l.step_row(29, 1), 29);
     }
 
     #[test]

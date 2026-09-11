@@ -252,14 +252,14 @@ impl App {
     /// content changes, so a request left outstanding on an idle window costs
     /// nothing: this is damage-driven, and the rate limit only bites on windows
     /// that really are animating.
-    fn request_capture(&mut self, i: usize, qh: &QueueHandle<Self>) -> bool {
+    fn request_capture(&mut self, i: usize, qh: &QueueHandle<Self>) {
         let t = &mut self.tiles[i];
         if t.frame.is_some() || t.session.is_none() {
-            return false; // already waiting on one
+            return; // already waiting on one
         }
         let Some(slot) = t.slots.iter().position(|s| !s.busy) else {
             self.stats.starved += 1;
-            return false; // both buffers still held by the compositor
+            return; // both buffers still held by the compositor
         };
         let (w, h) = (t.size.0 as i32, t.size.1 as i32);
         let frame = t
@@ -273,29 +273,44 @@ impl App {
         t.frame = Some(frame);
         t.filling = Some(slot);
         t.asked = Some(Instant::now());
-        true
     }
 
-    /// A capture landed: show it, and let go of the slot it replaced.
-    fn frame_ready(&mut self, i: usize) {
+    /// A capture landed: show it, and let go of the slot it replaced. Says
+    /// whether the tile is still waiting for a subsurface, which only the
+    /// overlay can give it.
+    fn frame_ready(&mut self, i: usize) -> bool {
+        // A tile scrolled out of sight was unmapped with a null buffer and
+        // still carries the position it had when it was last visible, so
+        // attaching here would put a stale thumbnail over whatever occupies
+        // that cell now. sync_tiles hands it back when it scrolls into view.
+        let visible = self.layout.tile(i as i32, self.scroll).is_some();
         let t = &mut self.tiles[i];
-        let Some(slot) = t.filling.take() else { return };
+        let Some(slot) = t.filling.take() else {
+            return false;
+        };
         t.frames += 1;
         t.ready = true;
         t.settled = true;
         t.slots[slot].busy = true; // the compositor reads it until it releases it
         let previous = t.showing.replace(slot);
-        // Before the overlay is mapped there is nothing to attach to yet;
-        // place_tiles picks up `showing` instead.
-        if let Some(surface) = t.surface.clone() {
-            let (w, h) = (t.size.0 as i32, t.size.1 as i32);
-            surface.attach(Some(&t.slots[slot].buffer), 0, 0);
-            surface.damage_buffer(0, 0, w, h);
-            surface.commit();
-        } else if let Some(prev) = previous {
-            // Not on screen yet, so the old slot was never actually read.
-            t.slots[prev].busy = false;
+        match t.surface.clone() {
+            Some(surface) if visible => {
+                let (w, h) = (t.size.0 as i32, t.size.1 as i32);
+                surface.attach(Some(&t.slots[slot].buffer), 0, 0);
+                surface.damage_buffer(0, 0, w, h);
+                surface.commit();
+            }
+            // Nothing was attached, so the old slot was never actually read.
+            _ => {
+                if let Some(prev) = previous {
+                    t.slots[prev].busy = false;
+                }
+            }
         }
+        // Before the overlay is mapped there is nothing to attach to yet, and
+        // sync_tiles picks up `showing` instead. A first frame landing after
+        // that has to ask for a subsurface, or it is captured and never seen.
+        t.surface.is_none()
     }
 
     /// Ask for the next frame callback. A commit is needed for the compositor to
@@ -380,7 +395,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
         event: ext_image_copy_capture_frame_v1::Event,
         &i: &usize,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         let Some(tile) = app.tiles.get_mut(i) else {
             return;
@@ -395,7 +410,11 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 if let Some(frame) = tile.frame.take() {
                     frame.destroy();
                 }
-                app.frame_ready(i);
+                // A tile whose first frame arrives after the overlay mapped has
+                // no subsurface yet, and nothing else would ever give it one.
+                if app.frame_ready(i) {
+                    app.sync_tiles(qh);
+                }
             }
             ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
                 // Live mode retries on the next tick; only a failure with no

@@ -23,12 +23,12 @@ pub fn memfd(name: &str, len: usize) -> io::Result<File> {
 }
 
 /// A mapped memfd we paint into. Holds two slots so we can draw the next frame
-/// without touching the one the compositor is currently reading.
+/// without touching the one the compositor is currently reading. Which of them
+/// is free is the caller's business: it is what hears the release events.
 pub struct Chrome {
     map: MmapMut,
     pub w: i32,
     pub h: i32,
-    slot: usize,
 }
 
 impl Chrome {
@@ -36,7 +36,7 @@ impl Chrome {
 
     pub fn new(file: &File, w: i32, h: i32) -> io::Result<Self> {
         let map = unsafe { MmapMut::map_mut(file)? };
-        Ok(Self { map, w, h, slot: 0 })
+        Ok(Self { map, w, h })
     }
 
     pub fn stride(w: i32) -> i32 {
@@ -47,17 +47,11 @@ impl Chrome {
         (Self::stride(w) * h) as usize
     }
 
-    /// Flip to the other slot and return its byte offset in the pool, so the
-    /// caller can attach the matching wl_buffer.
-    pub fn next_slot(&mut self) -> usize {
-        self.slot = (self.slot + 1) % Self::SLOTS;
-        self.slot
-    }
-
-    pub fn painter(&mut self) -> Painter<'_> {
+    /// Paint into `slot`, whose wl_buffer the caller then attaches.
+    pub fn painter(&mut self, slot: usize) -> Painter<'_> {
         let (w, h) = (self.w, self.h);
         let len = Self::slot_len(w, h);
-        let off = self.slot * len;
+        let off = slot * len;
         Painter {
             px: &mut self.map[off..off + len],
             w,
