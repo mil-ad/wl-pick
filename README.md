@@ -2,8 +2,7 @@
 
 A window switcher for wlroots compositors: a grid overlay of **live** window
 previews that looks like a rofi theme, and tells you which one you picked. It
-replaces a `wlthumbs | rofi` pipeline, and doubles as a screencast source picker
-for the desktop portal.
+doubles as a screencast source picker for the desktop portal.
 
 No thumbnails exist. Each window is captured straight into a `wl_shm` buffer
 handed to its own `wl_subsurface`, and `wp_viewporter` tells the compositor which
