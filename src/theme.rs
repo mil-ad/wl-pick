@@ -1,8 +1,7 @@
 //! Look and layout.
 //!
-//! The colours and spacing come from the rofi setup this replaces (mytheme.rasi
-//! plus the -theme-str rofigrid built): gruvbox dark, a yellow selection filling
-//! the element padding, `title · app` centred under each thumbnail.
+//! Gruvbox dark, a yellow selection filling the element padding, and
+//! `title · app` centred under each thumbnail.
 //!
 //! Sizing works from caps rather than from a thumbnail size. The config gives a
 //! box the grid may fill and a column and row limit; a thumbnail is that box
@@ -20,7 +19,7 @@ pub struct Theme {
     pub sel_bg: Argb,
     pub sel_fg: Argb,
     pub border: Argb,
-    /// Window border, logical px (rasi `border: 0.18em` at 12pt ~ 2px).
+    /// Window border, logical px.
     pub border_px: i32,
     /// The box the grid may not exceed, in logical px. Thumbnails are sized to
     /// divide it by the column and row caps below, so a thumbnail is the same
@@ -28,25 +27,24 @@ pub struct Theme {
     /// shrinks to hug what is there.
     pub max_w: i32,
     pub max_h: i32,
-    /// Padding inside one element, i.e. around its thumbnail (rasi `element`).
+    /// Padding inside one element, i.e. around its thumbnail.
     pub pad: i32,
-    /// Space between elements (rasi `listview { spacing }`).
+    /// Space between elements.
     pub gap: i32,
     /// Margin between the grid and the window edge.
     pub margin: i32,
     /// How many tiles the grid may show at once. Rows beyond `max_rows` scroll.
     pub max_cols: i32,
     pub max_rows: i32,
-    /// Gap between a thumbnail and its label (rasi `element { spacing }`).
+    /// Gap between a thumbnail and its label.
     pub spacing: i32,
     /// Label font family, resolved against the system's fonts. The default is
     /// the generic "monospace", which becomes whatever fontconfig says that is
-    /// here. Size and line height are logical px, matching the rofi theme the
-    /// look came from (12pt at pango size="small").
+    /// here. Size and line height are logical px, a little under 12pt.
     pub font: String,
     pub font_px: f32,
     pub line_h: i32,
-    /// Draw labels at all (rofigrid's --hide-labels drew an icon-only grid).
+    /// Draw labels at all; without them the grid is icons only.
     pub labels: bool,
 }
 
@@ -108,8 +106,8 @@ impl Layout {
     /// it does not change with how many windows are open: one window gets a
     /// normal thumbnail in a small overlay, thirty get the same thumbnail and
     /// scroll. Columns follow ceil(sqrt(n)) up to the cap, so a handful of
-    /// windows makes a tidy grid rather than one long row — the rule rofigrid
-    /// used — and the overlay hugs whatever is there.
+    /// windows makes a tidy grid rather than one long row, and the overlay hugs
+    /// whatever is there.
     pub fn new(t: &Theme, n: i32, display: (i32, i32)) -> Self {
         let n = n.max(0);
         let (cap_cols, cap_rows) = (t.max_cols.max(1), t.max_rows.max(1));
@@ -298,8 +296,7 @@ impl Rect {
 }
 
 /// Scale (w, h) to fit inside (bw, bh), keeping the aspect ratio, and centre it.
-/// Windows are usually portrait-ish next to a 16:9 cell, so this letterboxes the
-/// same way rofi's `element-icon { size: W H }` does.
+/// Windows are usually portrait-ish next to a 16:9 cell, so this letterboxes.
 pub fn fit_centred(w: i32, h: i32, box_: Rect) -> Rect {
     if w <= 0 || h <= 0 {
         return box_;

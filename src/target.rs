@@ -82,7 +82,7 @@ impl Target {
         }
     }
 
-    /// "title · app", the label the rofi grid used.
+    /// "title · app", the label drawn under a thumbnail.
     pub fn label(&self) -> String {
         if self.app.is_empty() {
             self.title.clone()

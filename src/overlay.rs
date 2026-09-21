@@ -232,8 +232,8 @@ impl App {
         let (cw, ch) = (chrome.w, chrome.h);
         let mut p = chrome.painter(slot);
         p.fill(bg);
-        // The selection fills the whole element box, padding included — the same
-        // thing rofi's element background does. It can be scrolled out of sight.
+        // The selection fills the whole element box, padding included. It can
+        // be scrolled out of sight.
         if let Some(elem) = elem {
             p.rect(elem, sel_bg);
         }

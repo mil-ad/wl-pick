@@ -333,8 +333,8 @@ fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f
     }
 }
 
-/// Shorten `text` until it fits in `box_w`, ending with an ellipsis — window
-/// titles are arbitrarily long, and rofi ellipsised them too.
+/// Shorten `text` until it fits in `box_w`, ending with an ellipsis, since
+/// window titles are arbitrarily long.
 fn ellipsize(
     fs: &mut FontSystem,
     attrs: &Attrs,

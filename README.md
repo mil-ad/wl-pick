@@ -1,13 +1,14 @@
 # wl-pick
 
-A window switcher for wlroots compositors: a grid of **live** window previews,
-styled like a rofi theme, that prints which one you picked. It doubles as a
-screencast source picker for the desktop portal.
+A window switcher for wlroots compositors: a grid of **live** window previews
+that prints which one you picked. It doubles as a screencast source picker for
+the desktop portal.
 
 No thumbnails are ever made. Each window is captured straight into a buffer
 handed to its own subsurface and the compositor does the scaling, so wl-pick
 appears in about 60 ms and sits around 6 MB resident however many windows are
-open.
+open. There is a longer write-up of why it works this way in
+[wl-pick: a live window picker for Sway](https://mil.ad/blog/2026/wl-pick.html).
 
 ## Install
 
@@ -121,8 +122,8 @@ bound the grid inside it, and a thumbnail is simply the one divided by the
 other. A thumbnail is therefore the same size whether one window is open or
 thirty — the overlay just hugs whatever is there. Rows past `max-rows` scroll.
 
-The default look is the rofi theme this replaces: gruvbox dark, `ceil(sqrt(n))`
-columns capped at 4, `title · app` centred under each thumbnail. Labels default
+The default look is gruvbox dark, `ceil(sqrt(n))` columns capped at 4, with
+`title · app` centred under each thumbnail. Labels default
 to the system monospace font; `--font` and the `font` setting take either a
 family such as `Iosevka`, or a full name with a style such as `Iosevka Bold`.
 A name matching nothing says so on stderr rather than quietly using something
@@ -133,8 +134,10 @@ else.
 A wlroots compositor advertising `ext-image-copy-capture-v1`,
 `ext-image-capture-source-v1`, `ext-foreign-toplevel-list-v1`,
 `wlr-layer-shell-unstable-v1` and `wp_viewporter`. In practice that means
-sway 1.11+, since sway's IPC socket is also the source of truth for the window
-list; Hyprland, labwc and jay advertise the protocols but are untested.
+sway 1.12+: 1.11 could capture whole outputs, and 1.12 extended that to
+individual windows, which is what the previews are. sway's IPC socket is also
+the source of truth for the window list. Hyprland, labwc and jay advertise the
+protocols but are untested.
 
 Known upstream issue: holding per-toplevel capture sessions open makes windows
 blurry on **fractionally scaled** outputs
