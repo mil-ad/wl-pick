@@ -18,12 +18,12 @@ cargo install wl-pick
 ## Usage
 
 wl-pick is a chooser: the pick goes to stdout, nothing does if you cancel, and
-it never acts on the choice itself. Exit status is 0 for a pick, 1 for a cancel,
-2 if `--timeout` fires.
+it never acts on the choice itself. Exit status is 0 for a pick, 1 for anything
+else, and 2 if `--timeout` fires.
 
 ```sh
 #!/usr/bin/env bash
-# ~/.local/bin/winmenu, bound to $mod+Tab
+# save as a script and bind it to $mod+Tab
 IFS=$'\t' read -r type id toplevel app title < <(wl-pick) || exit 0
 case $type in
     window) swaymsg "[con_id=$id] focus" ;;
@@ -40,7 +40,7 @@ esac
 | `--fps N` | live updates per tile per second (default 12) |
 | `--outputs` / `--no-outputs` | whether whole displays are tiles too (default on) |
 | `--labels` / `--no-labels` | whether a label is drawn under each thumbnail (default on) |
-| `--font NAME` | label font, as in `Iosevka` or `Iosevka Medium Condensed` |
+| `--font NAME` | label font: a family, optionally with a style |
 | `--font-size PX` | label size in logical px |
 | `--config PATH` | config file (default `~/.config/wl-pick/config`) |
 | `--timeout SECS` | exit after a deadline, whatever has happened |
@@ -124,8 +124,9 @@ thirty — the overlay just hugs whatever is there. Rows past `max-rows` scroll.
 The default look is the rofi theme this replaces: gruvbox dark, `ceil(sqrt(n))`
 columns capped at 4, `title · app` centred under each thumbnail. Labels default
 to the system monospace font; `--font` and the `font` setting take either a
-family or a full name like `Berkeley Mono Medium SemiCondensed`, and a name
-matching nothing says so on stderr rather than quietly using something else.
+family such as `Iosevka`, or a full name with a style such as `Iosevka Bold`.
+A name matching nothing says so on stderr rather than quietly using something
+else.
 
 ## Requirements
 
