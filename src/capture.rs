@@ -7,7 +7,9 @@
 //!
 //! The pixels are never mapped into this process. A capture buffer goes straight
 //! to a subsurface for display, so the compositor writes those pages and samples
-//! them again itself.
+//! them again itself. Nothing here interprets them, which leaves one thing that
+//! must still be right: the stride declared with each buffer, since how wide a
+//! row is depends on the format the session picked.
 
 use std::error::Error;
 use std::os::fd::AsFd;
@@ -74,73 +76,45 @@ fn choose_format(
     offered: &[wl_shm::Format],
     supported: &[wl_shm::Format],
 ) -> Option<(wl_shm::Format, i32)> {
+    let sized = |format: &wl_shm::Format| Some((*format, bytes_per_pixel(*format)?));
     offered
         .iter()
-        .find(|f| matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888))
+        .filter(|f| matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888))
+        .find_map(sized)
         .or_else(|| {
             offered
                 .iter()
-                .find(|f| bytes_per_pixel(**f).is_some() && supported.contains(f))
+                .filter(|f| supported.contains(f))
+                .find_map(sized)
         })
-        .and_then(|f| Some((*f, bytes_per_pixel(*f)?)))
 }
 
-/// How many bytes one pixel of `format` takes, for the formats whose rows are
-/// simply width times that.
+/// How many bytes one pixel takes, for the formats a row of which is simply the
+/// width times that.
 ///
-/// A capture session may offer formats beyond the two wl_shm guarantees --
-/// deeper colour on an HDR or 10-bit output, say -- and they are not all four
-/// bytes wide. Declaring a four-byte stride for an eight-byte format is a
-/// protocol error that kills the connection, so anything not listed here is
-/// something we decline rather than guess at. Subsampled and multi-planar
-/// formats are absent deliberately: their rows are not width times a constant.
+/// These are the ones wlroots can hand us (its `pixel_formats` table), and a
+/// capture session offers whatever it can capture into -- not only the two
+/// wl_shm guarantees, and not all four bytes wide. Declaring a four-byte stride
+/// for an eight-byte format is a protocol error that takes the connection with
+/// it, so a format missing from here is one to decline rather than guess at.
+///
+/// Subsampled formats are absent deliberately. YUYV and friends do have a
+/// constant block size, but a block covers two pixels, so their rows are
+/// narrower than width times it and the arithmetic here would not hold.
 fn bytes_per_pixel(format: wl_shm::Format) -> Option<i32> {
     use wl_shm::Format;
     Some(match format {
-        Format::C8 | Format::Rgb332 | Format::Bgr233 => 1,
-        Format::Xrgb4444
-        | Format::Xbgr4444
-        | Format::Rgbx4444
-        | Format::Bgrx4444
-        | Format::Argb4444
-        | Format::Abgr4444
-        | Format::Rgba4444
-        | Format::Bgra4444
-        | Format::Xrgb1555
-        | Format::Xbgr1555
-        | Format::Rgbx5551
-        | Format::Bgrx5551
-        | Format::Argb1555
-        | Format::Abgr1555
-        | Format::Rgba5551
-        | Format::Bgra5551
-        | Format::Rgb565
-        | Format::Bgr565 => 2,
+        Format::Rgb565 | Format::Bgr565 => 2,
+        Format::Xrgb1555 | Format::Argb1555 => 2,
+        Format::Rgbx4444 | Format::Rgba4444 | Format::Bgrx4444 | Format::Bgra4444 => 2,
+        Format::Rgbx5551 | Format::Rgba5551 | Format::Bgrx5551 | Format::Bgra5551 => 2,
         Format::Rgb888 | Format::Bgr888 => 3,
-        Format::Xrgb8888
-        | Format::Xbgr8888
-        | Format::Rgbx8888
-        | Format::Bgrx8888
-        | Format::Argb8888
-        | Format::Abgr8888
-        | Format::Rgba8888
-        | Format::Bgra8888
-        | Format::Xrgb2101010
-        | Format::Xbgr2101010
-        | Format::Rgbx1010102
-        | Format::Bgrx1010102
-        | Format::Argb2101010
-        | Format::Abgr2101010
-        | Format::Rgba1010102
-        | Format::Bgra1010102 => 4,
-        Format::Xrgb16161616
-        | Format::Xbgr16161616
-        | Format::Argb16161616
-        | Format::Abgr16161616
-        | Format::Xrgb16161616f
-        | Format::Xbgr16161616f
-        | Format::Argb16161616f
-        | Format::Abgr16161616f => 8,
+        Format::Xrgb8888 | Format::Argb8888 | Format::Xbgr8888 | Format::Abgr8888 => 4,
+        Format::Rgbx8888 | Format::Rgba8888 | Format::Bgrx8888 | Format::Bgra8888 => 4,
+        Format::Xrgb2101010 | Format::Argb2101010 => 4,
+        Format::Xbgr2101010 | Format::Abgr2101010 => 4,
+        Format::Xbgr16161616 | Format::Abgr16161616 => 8,
+        Format::Xbgr16161616f | Format::Abgr16161616f => 8,
         _ => return None,
     })
 }
@@ -266,6 +240,8 @@ impl App {
     /// touching it again.
     pub fn start_captures(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
         const PAGE: usize = 4096;
+        // Cloned because the loop below borrows the tiles mutably; the list is
+        // short and fixed once wl_shm has announced it.
         let shm_formats = self.shm_formats.clone();
         let mut total = 0usize;
         let mut offsets: Vec<Vec<usize>> = Vec::with_capacity(self.tiles.len());
@@ -653,11 +629,14 @@ mod tests {
 
     #[test]
     fn pixel_sizes_match_the_names() {
-        assert_eq!(bytes_per_pixel(Format::Rgb332), Some(1));
         assert_eq!(bytes_per_pixel(Format::Rgb565), Some(2));
         assert_eq!(bytes_per_pixel(Format::Bgr888), Some(3));
         assert_eq!(bytes_per_pixel(Format::Xrgb2101010), Some(4));
         assert_eq!(bytes_per_pixel(Format::Xbgr16161616f), Some(8));
-        assert_eq!(bytes_per_pixel(Format::Nv12), None);
+        // Subsampled: wlroots gives these a four-byte block too, but a block
+        // is two pixels wide, so a row is not the width times it.
+        assert_eq!(bytes_per_pixel(Format::Yuyv), None);
+        // Not something a wlroots renderer offers, so not something to guess.
+        assert_eq!(bytes_per_pixel(Format::Rgb332), None);
     }
 }
