@@ -54,16 +54,23 @@ impl Length {
     }
 }
 
-/// `#rrggbb` or `#aarrggbb`, to the premultiplied-alpha-free 0xAARRGGBB the
-/// painter uses. Opaque when no alpha is given.
+/// `#rrggbb` or `#aarrggbb`, to the premultiplied 0xAARRGGBB the painter
+/// writes. Opaque when no alpha is given; otherwise the channels are scaled by
+/// it here, because that is what a wl_shm buffer means by a colour with alpha.
 pub fn colour(s: &str) -> Result<Argb, String> {
     let hex = s.trim().strip_prefix('#').unwrap_or(s.trim());
     let value = u32::from_str_radix(hex, 16).map_err(|_| format!("{s:?} is not a colour"))?;
     match hex.len() {
         6 => Ok(0xff00_0000 | value),
-        8 => Ok(value),
+        8 => Ok(premultiply(value)),
         _ => Err(format!("{s:?} should be #rrggbb or #aarrggbb")),
     }
+}
+
+fn premultiply(argb: u32) -> Argb {
+    let a = argb >> 24;
+    let scale = |shift: u32| (((argb >> shift) & 0xff) * a / 255) << shift;
+    a << 24 | scale(16) | scale(8) | scale(0)
 }
 
 fn boolean(s: &str) -> Result<bool, String> {
@@ -105,13 +112,18 @@ impl Config {
     /// malformed one is, because silently ignoring a typo in a colour is worse
     /// than refusing to start.
     pub fn load(path: Option<&Path>) -> Result<Self, String> {
-        let (path, required) = match path {
-            Some(p) => (p.to_path_buf(), true),
-            None => (default_path(), false),
-        };
-        match std::fs::read_to_string(&path) {
+        match path {
+            Some(p) => Self::read(p, true),
+            None => Self::read(&default_path(), false),
+        }
+    }
+
+    /// `required` is the difference between a path the user named, which must
+    /// exist, and the default location, which may simply not be in use.
+    fn read(path: &Path, required: bool) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())),
-            Err(_) if !required => Ok(Self::default()),
+            Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
     }
@@ -145,7 +157,7 @@ impl Config {
             "max-columns" => self.max_columns = Some(number(value)?),
             "max-rows" => self.max_rows = Some(number(value)?),
             "font" => self.font = Some(value.to_string()),
-            "font-size" => self.font_size = Some(number(value)?),
+            "font-size" => self.font_size = Some(font_size(value)?),
             "labels" => self.labels = Some(boolean(value)?),
             "outputs" => self.outputs = Some(boolean(value)?),
             "live" => self.live = Some(Live::parse(value)?),
@@ -175,6 +187,17 @@ fn strip_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+/// A label size in logical pixels. cosmic-text asserts on a zero line height,
+/// and nothing good comes of a negative one, so the check is here rather than
+/// a panic on the label thread later.
+pub fn font_size(s: &str) -> Result<f32, String> {
+    let px: f32 = number(s)?;
+    if !px.is_finite() || px <= 0.0 {
+        return Err(format!("{s:?} is not a positive size"));
+    }
+    Ok(px)
 }
 
 fn number<T: std::str::FromStr>(s: &str) -> Result<T, String> {
@@ -219,7 +242,7 @@ mod tests {
     #[test]
     fn colours_take_both_lengths() {
         assert_eq!(colour("#282828"), Ok(0xff282828));
-        assert_eq!(colour("#80ffffff"), Ok(0x80ffffff));
+        assert_eq!(colour("#80ffffff"), Ok(0x80808080), "premultiplied");
         assert_eq!(colour("282828"), Ok(0xff282828));
         assert!(colour("#zzz").is_err());
         assert!(colour("#fff").is_err());
@@ -284,14 +307,38 @@ timeout = 0
     }
 
     #[test]
-    fn a_missing_file_is_not_an_error() {
+    fn only_the_default_file_may_be_missing() {
         let missing = Path::new("/nonexistent/wl-pick/config");
         assert!(
-            Config::load(Some(missing)).is_err(),
-            "named file must exist"
+            Config::read(missing, true).is_err(),
+            "a named file must exist"
         );
-        // The default location is allowed to be absent.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/nonexistent") };
-        assert!(Config::load(None).is_ok());
+        assert!(
+            Config::read(missing, false).is_ok(),
+            "the default may be absent"
+        );
+        // Absent is the only excuse: a default file that exists but cannot be
+        // read is a real problem, not a user who has not written one.
+        let unreadable = Path::new("/");
+        assert!(
+            Config::read(unreadable, false).is_err(),
+            "a directory is not a config"
+        );
+    }
+
+    #[test]
+    fn a_size_must_be_positive_and_finite() {
+        assert_eq!(font_size("13.3"), Ok(13.3));
+        assert!(font_size("0").is_err());
+        assert!(font_size("-5").is_err());
+        assert!(font_size("nan").is_err());
+        assert!(font_size("inf").is_err());
+    }
+
+    #[test]
+    fn translucent_colours_are_premultiplied() {
+        assert_eq!(colour("#80ffffff"), Ok(0x80808080));
+        assert_eq!(colour("#ff282828"), Ok(0xff282828), "opaque is untouched");
+        assert_eq!(colour("#00ff0000"), Ok(0x00000000), "fully clear is clear");
     }
 }

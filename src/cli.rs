@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::app::Settings;
 use crate::capture::Live;
-use crate::config::{Config, Length};
+use crate::config::{self, Config, Length};
 use crate::sway::Display;
 use crate::target::Format;
 use crate::theme::Theme;
@@ -232,7 +232,8 @@ fn parse(it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--font" => args.font = Some(it.next().ok_or("--font needs a font name")?),
             "--font-size" => {
                 let v = it.next().ok_or("--font-size needs px")?;
-                args.font_size = Some(v.parse().map_err(|_| format!("bad --font-size: {v}"))?);
+                args.font_size =
+                    Some(config::font_size(&v).map_err(|e| format!("--font-size: {e}"))?);
             }
             "--timeout" => {
                 let v = it.next().ok_or("--timeout needs seconds")?;

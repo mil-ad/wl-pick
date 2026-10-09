@@ -164,7 +164,7 @@ impl App {
                 t.subsurface = Some(subsurface);
                 t.viewport = Some(viewport);
             }
-            let t = &self.tiles[i];
+            let t = &mut self.tiles[i];
             let (surface, subsurface, viewport) = (
                 t.surface.clone().expect("just created"),
                 t.subsurface.clone().expect("just created"),
@@ -173,8 +173,16 @@ impl App {
             let slot = t.showing.expect("a ready tile has a slot");
             subsurface.set_position(dst.x, dst.y);
             viewport.set_destination(dst.w, dst.h);
-            surface.attach(Some(&t.slots[slot].buffer), 0, 0);
-            surface.damage_buffer(0, 0, bw as i32, bh as i32);
+            // Attaching is what costs: the compositor uploads the whole buffer
+            // again, full resolution, whether or not it changed. A scroll only
+            // moves tiles, so a buffer already on the subsurface stays put. One
+            // that goes on is being read from now until it is released.
+            if t.attached != Some(slot) {
+                surface.attach(Some(&t.slots[slot].buffer), 0, 0);
+                surface.damage_buffer(0, 0, bw as i32, bh as i32);
+                t.slots[slot].busy = true;
+                t.attached = Some(slot);
+            }
             surface.commit();
         }
         // Subsurface placement is *parent* state: it only takes effect when the
@@ -184,7 +192,10 @@ impl App {
 
     /// Unmap a tile's subsurface by attaching nothing to it.
     fn hide_tile(&mut self, i: usize) {
-        if let Some(surface) = self.tiles[i].surface.clone() {
+        let t = &mut self.tiles[i];
+        if let Some(surface) = t.surface.clone()
+            && t.attached.take().is_some()
+        {
             surface.attach(None, 0, 0);
             surface.commit();
         }
@@ -370,9 +381,13 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 layer.ack_configure(serial);
-                app.configured = true;
+                app.granted = Some((width, height));
             }
             zwlr_layer_surface_v1::Event::Closed => app.ending = Ending::Closed,
             _ => {}
@@ -395,15 +410,33 @@ impl Dispatch<WlSeat, ()> for App {
         else {
             return;
         };
-        if caps.contains(wl_seat::Capability::Keyboard) {
-            seat.get_keyboard(qh, ());
+        // This is sent again whenever a device is plugged or unplugged, so it
+        // describes a state to match rather than an event to act on.
+        match (caps.contains(wl_seat::Capability::Keyboard), &app.keyboard) {
+            (true, None) => app.keyboard = Some(seat.get_keyboard(qh, ())),
+            (false, Some(keyboard)) => {
+                keyboard.release();
+                app.keyboard = None;
+            }
+            _ => {}
         }
-        if caps.contains(wl_seat::Capability::Pointer) {
-            let pointer = seat.get_pointer(qh, ());
-            app.cursor_device = app
-                .cursor_shape
-                .as_ref()
-                .map(|mgr| mgr.get_pointer(&pointer, qh, ()));
+        match (caps.contains(wl_seat::Capability::Pointer), &app.pointer) {
+            (true, None) => {
+                let pointer = seat.get_pointer(qh, ());
+                app.cursor_device = app
+                    .cursor_shape
+                    .as_ref()
+                    .map(|mgr| mgr.get_pointer(&pointer, qh, ()));
+                app.pointer = Some(pointer);
+            }
+            (false, Some(pointer)) => {
+                if let Some(device) = app.cursor_device.take() {
+                    device.destroy();
+                }
+                pointer.release();
+                app.pointer = None;
+            }
+            _ => {}
         }
     }
 }
@@ -438,6 +471,7 @@ impl Dispatch<WlKeyboard, ()> for App {
             // alone would make Shift+Tab move forwards.
             wl_keyboard::Event::Enter { keys, .. } => {
                 app.focused = true;
+                app.ever_focused = true;
                 app.shift = keys
                     .chunks_exact(4)
                     .filter_map(|k| k.try_into().ok())

@@ -111,20 +111,18 @@ impl Target {
     /// The same record as JSON, with every key always present so `jq` can rely
     /// on it. Written by hand: one object is not worth a serialiser.
     pub fn json(&self) -> String {
-        let opt = |v: Option<String>| match v {
-            Some(s) => format!("\"{}\"", esc(&s)),
-            None => "null".to_string(),
-        };
+        let quoted = |s: &str| format!("\"{}\"", esc(s));
         let (con_id, output) = match self.kind {
             Kind::Window => (
-                self.con_id.map(|n| n.to_string()).unwrap_or("null".into()),
+                self.con_id.map_or("null".to_string(), |n| n.to_string()),
                 "null".to_string(),
             ),
-            Kind::Output => ("null".to_string(), opt(Some(self.id.clone()))),
+            Kind::Output => ("null".to_string(), quoted(&self.id)),
         };
-        let toplevel = match self.ft_id.is_empty() {
-            true => "null".to_string(),
-            false => format!("\"{}\"", esc(&self.ft_id)),
+        let toplevel = if self.ft_id.is_empty() {
+            "null".to_string()
+        } else {
+            quoted(&self.ft_id)
         };
         format!(
             "{{\"type\":\"{}\",\"con_id\":{con_id},\"toplevel_id\":{toplevel},\

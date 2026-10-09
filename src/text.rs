@@ -53,27 +53,30 @@ const MONO_CANDIDATES: &[&str] = &[
     "Courier New",
 ];
 
-/// Load the smallest font database that can render `family`.
+/// The fonts to shape with, and whether that is already every font on the
+/// system.
 ///
-/// `FontSystem::new()` scans every system font, which costs ~37ms — most of the
-/// startup budget. A user's own font directories are tiny by comparison, so try
-/// those first and only pay for the full scan when the family really isn't there
-/// (which is also what makes an unknown family fall back gracefully). The
-/// generic default lives among the system fonts, so it skips that shortcut.
-fn font_db(family: &str) -> FontSystem {
+/// The full scan costs ~37ms, which the label thread cannot always hide inside
+/// the capture wait. A user's own font directories are tiny, so a named family
+/// is looked for there first and the scan is paid only when the family is not
+/// there. (A label that then needs a glyph the family lacks adds the rest
+/// later; see `build`.) The generic default lives among the system fonts.
+fn font_db(family: &str) -> (FontSystem, bool) {
     let mut db = fontdb::Database::new();
-    if !is_generic(family) {
+    let mut full = is_generic(family);
+    if !full {
         if let Ok(home) = std::env::var("HOME") {
             db.load_fonts_dir(format!("{home}/.fonts"));
             db.load_fonts_dir(format!("{home}/.local/share/fonts"));
         }
-        if interpret(&db, family).is_some() {
-            // The locale only orders CJK fallbacks; labels are ids and titles.
-            return FontSystem::new_with_locale_and_db("en-US".to_string(), db);
-        }
+        full = interpret(&db, family).is_none();
     }
-    db.load_system_fonts();
-    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
+    if full {
+        db.load_system_fonts();
+    }
+    // The locale only orders CJK fallbacks; labels are ids and titles.
+    let fs = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
+    (fs, full)
 }
 
 fn is_generic(family: &str) -> bool {
@@ -307,22 +310,27 @@ fn fc_match_mono() -> Option<String> {
 }
 
 fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f32) -> Labels {
-    let mut fs = font_db(&family);
-    let mut cache = SwashCache::new();
+    let metrics = Metrics::new(font_px, line_h);
+    let (mut fs, full) = font_db(&family);
     let choice = choose(fs.db(), &family);
     let attrs = choice.attrs();
-    let metrics = Metrics::new(font_px, line_h);
-
-    let mut lines = Vec::with_capacity(texts.len());
-    for text in &texts {
-        let fitted = ellipsize(&mut fs, &attrs, metrics, text, box_w);
-        let mut buf = Buffer::new(&mut fs, metrics);
-        buf.set_wrap(Wrap::None);
-        buf.set_size(Some(box_w), Some(line_h));
-        buf.set_text(&fitted, &attrs, Shaping::Advanced, Some(Align::Center));
-        // Warm the glyph cache here instead of on the first paint.
-        buf.draw(&mut fs, &mut cache, Color::rgb(0, 0, 0), |_, _, _, _, _| {});
-        lines.push(buf);
+    let mut cache = SwashCache::new();
+    let mut lines: Vec<Buffer> = texts
+        .iter()
+        .map(|text| shape(&mut fs, &mut cache, &attrs, metrics, text, box_w))
+        .collect();
+    // A family draws a box for a character it has no glyph for, and the rest of
+    // the system's fonts are what fill those in. A title in another script, or
+    // with an emoji in it, is worth the scan; most are not, so it waits for
+    // one. Faces keep their ids when more are added, so only the lines that
+    // showed a box are shaped again.
+    if !full && lines.iter_mut().any(has_missing_glyph) {
+        fs.db_mut().load_system_fonts();
+        for (line, text) in lines.iter_mut().zip(&texts) {
+            if has_missing_glyph(line) {
+                *line = shape(&mut fs, &mut cache, &attrs, metrics, text, box_w);
+            }
+        }
     }
     Labels {
         fs,
@@ -331,6 +339,32 @@ fn build(texts: Vec<String>, family: String, font_px: f32, line_h: f32, box_w: f
         // What was actually used, not what was asked for.
         family: choice.name(),
     }
+}
+
+/// One centred line, fitted to `box_w` and already rasterised into `cache`, so
+/// the first paint costs nothing.
+fn shape(
+    fs: &mut FontSystem,
+    cache: &mut SwashCache,
+    attrs: &Attrs,
+    metrics: Metrics,
+    text: &str,
+    box_w: f32,
+) -> Buffer {
+    let fitted = ellipsize(fs, attrs, metrics, text, box_w);
+    let mut buf = Buffer::new(fs, metrics);
+    buf.set_wrap(Wrap::None);
+    buf.set_size(Some(box_w), Some(metrics.line_height));
+    buf.set_text(&fitted, attrs, Shaping::Advanced, Some(Align::Center));
+    buf.draw(fs, cache, Color::rgb(0, 0, 0), |_, _, _, _, _| {});
+    buf
+}
+
+/// Glyph 0 is `.notdef` in every font: the box drawn for a character the font
+/// does not have.
+fn has_missing_glyph(line: &mut Buffer) -> bool {
+    line.layout_runs()
+        .any(|run| run.glyphs.iter().any(|glyph| glyph.glyph_id == 0))
 }
 
 /// Shorten `text` until it fits in `box_w`, ending with an ellipsis, since
@@ -429,7 +463,7 @@ mod tests {
 
     #[test]
     fn the_generic_default_resolves_to_a_real_monospace_family() {
-        let fs = font_db(SYSTEM_MONO);
+        let (fs, _) = font_db(SYSTEM_MONO);
         let choice = choose(fs.db(), SYSTEM_MONO);
         assert_ne!(
             choice.family, SYSTEM_MONO,
@@ -448,7 +482,7 @@ mod tests {
         // shaped in whatever it liked while --verbose reported the name that
         // had been asked for -- so a font setting that did nothing looked
         // exactly like one that worked.
-        let fs = font_db(SYSTEM_MONO);
+        let (fs, _) = font_db(SYSTEM_MONO);
         let asked = choose(fs.db(), "No Such Family At All");
         assert_eq!(asked, choose(fs.db(), SYSTEM_MONO), "should be the default");
         assert_ne!(asked.family, "No Such Family At All");
@@ -532,6 +566,32 @@ mod tests {
         let choice = split_request("berkeley mono bold", db(&["Berkeley Mono"])).expect("resolves");
         assert_eq!(choice.family, "Berkeley Mono", "the database's spelling");
         assert_eq!(choice.weight, Weight::BOLD);
+    }
+
+    #[test]
+    fn a_missing_glyph_is_noticed() {
+        // One face on its own cannot have every script, so an emoji and a CJK
+        // character shaped against it alone are the box the fallback exists
+        // to replace -- and plain ASCII in the same face is not.
+        let mut full = fontdb::Database::new();
+        full.load_system_fonts();
+        let Some(face) = full.faces().find(|f| f.monospaced) else {
+            return; // a system with no fonts at all has nothing to test
+        };
+        let fontdb::Source::File(path) = &face.source else {
+            return;
+        };
+        let mut one = fontdb::Database::new();
+        one.load_font_file(path)
+            .expect("the face came from this file");
+        let mut fs = FontSystem::new_with_locale_and_db("en-US".to_string(), one);
+        let mut cache = SwashCache::new();
+        let attrs = Attrs::new();
+        let metrics = Metrics::new(26.0, 34.0);
+        let mut boxes = shape(&mut fs, &mut cache, &attrs, metrics, "日本 🦀", 400.0);
+        assert!(has_missing_glyph(&mut boxes));
+        let mut plain = shape(&mut fs, &mut cache, &attrs, metrics, "Hello", 400.0);
+        assert!(!has_missing_glyph(&mut plain));
     }
 
     #[test]

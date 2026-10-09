@@ -3,9 +3,10 @@
 //! choice belongs to whatever called it.
 //!
 //! The interesting constraint is opening fast, because a picker that lags is a
-//! picker you stop using. Two things follow from it. The compositor spends ~55ms
-//! copying window pixels back for us, and that time is otherwise spent blocked,
-//! so the labels are shaped on a worker thread inside it. And the pixels never
+//! picker you stop using. Two things follow from it. The compositor spends tens
+//! of milliseconds copying window pixels back for us -- more the more windows
+//! there are -- and that time is otherwise spent blocked, so the labels are
+//! shaped on a worker thread inside it. And the pixels never
 //! pass through this process at all: each capture buffer is handed straight to a
 //! subsurface with wp_viewporter naming the rectangle to scale it into, so there
 //! is no thumbnail encoding, no scaler, and no full-resolution image in our
@@ -104,9 +105,9 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     // The grid is measured once here: the label shaping below and the overlay
     // itself must agree about how wide a label may be.
     let layout = Layout::new(theme, targets.len() as i32, display);
-    // Start shaping labels now: it costs ~55ms of font loading and glyph
-    // rasterising, and the captures below are ~55ms of waiting on the
-    // compositor, so the two overlap almost exactly.
+    // Start shaping labels now: font loading and glyph rasterising cost tens
+    // of milliseconds, and the captures below are at least that long a wait
+    // on the compositor, so the two overlap.
     let labels = layout.label(0, 0).map(|label| {
         text::spawn(
             targets.iter().map(Target::label).collect(),
@@ -159,10 +160,27 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         &conn,
         &mut queue,
         &mut app,
-        |a| a.configured,
+        |a| a.granted.is_some(),
         STARTUP_BUDGET,
     )? {
         return Err("the compositor never configured the overlay".into());
+    }
+    // The chrome is painted at the size that was asked for, and a layer
+    // surface must honour the size it was granted, so they have to agree. They
+    // always do on sway -- the grid is clamped to the display, and asks to
+    // ignore what a bar reserves -- but a compositor that grants less is not
+    // one to paint over. Zero means the compositor left the choice to us.
+    let asked = (app.layout.width as u32, app.layout.height as u32);
+    if let Some(granted @ (w, h)) = app.granted
+        && w != 0
+        && h != 0
+        && granted != asked
+    {
+        return Err(format!(
+            "the compositor granted {}x{} for a {}x{} overlay",
+            w, h, asked.0, asked.1
+        )
+        .into());
     }
     app.paint();
     app.sync_tiles(&qh);
@@ -198,6 +216,12 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
 /// because sway also cycles focus off and straight back on in a single batch as
 /// the pointer crosses the surface, so a leave is believed only once it has
 /// failed to come back.
+///
+/// Not having the grab yet is a different thing from having lost it. The first
+/// enter can trail the map by more than a focus refresh takes, so until it has
+/// arrived the wait is the startup budget -- long enough for a slow compositor,
+/// short enough that an overlay behind a lock screen still gives up. A seat
+/// with no keyboard at all never gets one, and the pointer can pick on its own.
 fn pump_interactive(
     conn: &Connection,
     queue: &mut EventQueue<App>,
@@ -205,16 +229,15 @@ fn pump_interactive(
 ) -> Result<(), Box<dyn Error>> {
     while !app.finished() {
         queue.blocking_dispatch(app)?;
-        if app.finished() || app.focused {
+        if app.finished() || app.focused || app.keyboard.is_none() {
             continue;
         }
-        if !pump_for(
-            conn,
-            queue,
-            app,
-            |a| a.focused || a.finished(),
-            REFOCUS_GRACE,
-        )? {
+        let grace = if app.ever_focused {
+            REFOCUS_GRACE
+        } else {
+            STARTUP_BUDGET
+        };
+        if !pump_for(conn, queue, app, |a| a.focused || a.finished(), grace)? {
             app.ending = Ending::Unfocused;
         }
     }

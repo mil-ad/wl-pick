@@ -11,7 +11,9 @@ use wayland_client::globals::{GlobalList, GlobalListContents};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_compositor::WlCompositor,
+    wl_keyboard::WlKeyboard,
     wl_output::{self, WlOutput},
+    wl_pointer::WlPointer,
     wl_registry::WlRegistry,
     wl_seat::WlSeat,
     wl_shm::{self, WlShm},
@@ -102,6 +104,11 @@ pub struct App {
     /// values for a single flick, so those are added up rather than counted.
     pub(crate) scroll_acc: f64,
     pub(crate) scroll_finger: bool,
+    /// The seat's devices, created when it says it has them and released when
+    /// it says it no longer does. wl_seat re-announces its capabilities on
+    /// hotplug, and a second keyboard would hear every key twice.
+    pub(crate) keyboard: Option<WlKeyboard>,
+    pub(crate) pointer: Option<WlPointer>,
     /// Set the cursor shape without shipping a cursor theme. Optional: without
     /// it the pointer keeps whatever shape it had over the window below.
     pub(crate) cursor_shape: Option<WpCursorShapeManagerV1>,
@@ -116,14 +123,19 @@ pub struct App {
     /// being read tears what is on screen, so taking turns is not enough.
     pub(crate) chrome_busy: [bool; shm::Chrome::SLOTS],
     pub(crate) repaint_due: bool,
-    pub(crate) configured: bool,
+    /// The size the compositor granted the layer surface, once it has. The
+    /// chrome is painted at the size that was asked for, so these must agree.
+    pub(crate) granted: Option<(u32, u32)>,
 
     /// The display the overlay maps on, by name.
     pub(crate) output: String,
 
     pub(crate) ending: Ending,
-    /// Whether we hold the keyboard. Without it the overlay cannot be operated.
+    /// Whether we hold the keyboard, and whether we ever have. Without it the
+    /// overlay cannot be operated; losing it is final, but it can also simply
+    /// not have arrived yet.
     pub(crate) focused: bool,
+    pub(crate) ever_focused: bool,
     pub(crate) picked: Option<Target>,
     pub(crate) stats: Stats,
 }
@@ -208,6 +220,8 @@ impl App {
             pressed: None,
             scroll_acc: 0.0,
             scroll_finger: false,
+            keyboard: None,
+            pointer: None,
             cursor_shape: globals.bind(qh, 1..=2, ()).ok(),
             cursor_device: None,
             labels: None,
@@ -216,10 +230,11 @@ impl App {
             chrome_buffers: Vec::new(),
             chrome_busy: [false; shm::Chrome::SLOTS],
             repaint_due: false,
-            configured: false,
+            granted: None,
             output,
             ending: Ending::Running,
             focused: false,
+            ever_focused: false,
             picked: None,
             stats: Stats::default(),
         };

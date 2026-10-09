@@ -24,7 +24,7 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::{
-    ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
+    ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1, FailureReason},
     ext_image_copy_capture_manager_v1,
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
 };
@@ -119,6 +119,14 @@ fn bytes_per_pixel(format: wl_shm::Format) -> Option<i32> {
     })
 }
 
+/// Where each tile's buffers go in the capture pool.
+#[derive(Default)]
+struct PoolPlan {
+    total: usize,
+    /// Tile index, and the pool offset of each of its slots.
+    slots: Vec<(usize, Vec<usize>)>,
+}
+
 pub struct Tile {
     pub(crate) target: Target,
 
@@ -127,15 +135,22 @@ pub struct Tile {
     pub(crate) frame: Option<ExtImageCopyCaptureFrameV1>,
     pub(crate) filling: Option<usize>,
     pub(crate) slots: Vec<Slot>,
-    /// The slot currently attached to the subsurface.
+    /// The slot that should be on screen, and the one the subsurface actually
+    /// has attached. They differ while the tile is scrolled out of sight, and
+    /// an attach only costs the compositor an upload when they do.
     pub(crate) showing: Option<usize>,
+    pub(crate) attached: Option<usize>,
     pub(crate) formats: Vec<wl_shm::Format>,
     pub(crate) format: Option<wl_shm::Format>,
     /// Bytes per row of the capture buffer, which depends on the format: a
     /// stride that does not match is a protocol error, not a wrong picture.
     pub(crate) stride: i32,
-    /// Buffer size the session requires: the window's full resolution.
+    /// Buffer size the session required when the buffers were allocated: the
+    /// window's full resolution at the time.
     pub(crate) size: (u32, u32),
+    /// The source has changed size since. The buffers no longer fit it, so the
+    /// tile keeps its last frame rather than asking for one it cannot hold.
+    pub(crate) stale: bool,
     pub(crate) transform: wl_output::Transform,
     pub(crate) session_done: bool,
     pub(crate) ready: bool,
@@ -159,10 +174,12 @@ impl Tile {
             filling: None,
             slots: Vec::new(),
             showing: None,
+            attached: None,
             formats: Vec::new(),
             format: None,
             stride: 0,
             size: (0, 0),
+            stale: false,
             transform: wl_output::Transform::Normal,
             session_done: false,
             ready: false,
@@ -239,14 +256,10 @@ impl App {
     /// fill B while A is on screen, swap, and wait for A's release before
     /// touching it again.
     pub fn start_captures(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
-        const PAGE: usize = 4096;
         // Cloned because the loop below borrows the tiles mutably; the list is
         // short and fixed once wl_shm has announced it.
         let shm_formats = self.shm_formats.clone();
-        let mut total = 0usize;
-        let mut offsets: Vec<Vec<usize>> = Vec::with_capacity(self.tiles.len());
         for tile in &mut self.tiles {
-            offsets.push(Vec::new());
             if tile.session.is_none() {
                 continue;
             }
@@ -264,42 +277,51 @@ impl App {
             };
             tile.format = Some(format);
             tile.stride = tile.size.0 as i32 * bytes;
-            // Only a tile that will be re-captured needs a second buffer, and a
-            // display's is the size of the whole screen.
-            let slots = if self.live == Live::None || tile.target.kind == Kind::Output {
-                1
-            } else {
-                2
-            };
-            let last = offsets.last_mut().expect("just pushed");
-            for _ in 0..slots {
-                last.push(total);
-                total += tile.bytes().div_ceil(PAGE) * PAGE;
-            }
         }
-        if total == 0 {
+
+        // A live tile alternates between two buffers; anything else needs one,
+        // and a display's is the size of the whole screen. A wl_shm pool is
+        // limited to what fits in an i32, so if two each will not, fall back
+        // to one each and say so.
+        let live = self.live != Live::None;
+        let mut plan = self.plan_pool(|t| {
+            if live && t.target.kind != Kind::Output {
+                2
+            } else {
+                1
+            }
+        });
+        if plan.total > i32::MAX as usize {
+            eprintln!(
+                "wl-pick: {} MB of capture buffers is more than wl_shm allows; \
+                 using one per window",
+                plan.total >> 20
+            );
+            plan = self.plan_pool(|_| 1);
+        }
+        if plan.total > i32::MAX as usize {
+            return Err(format!(
+                "{} MB of capture buffers is more than wl_shm allows; try --no-outputs",
+                plan.total >> 20
+            )
+            .into());
+        }
+        if plan.total == 0 {
             return Ok(());
         }
 
-        self.stats.pool_bytes = total;
+        self.stats.pool_bytes = plan.total;
         // Note: no mmap. The compositor writes these pages and samples them
         // again for display; mapping them here would only cost us the faults.
-        let file = shm::memfd("wl-pick-capture", total)?;
-        let pool = self.shm.create_pool(file.as_fd(), total as i32, qh, ());
-        for (i, slot_offsets) in offsets.iter().enumerate() {
-            let (w, h, stride, format) = {
-                let t = &self.tiles[i];
-                if t.settled || t.session.is_none() || t.format.is_none() {
-                    continue;
-                }
-                (
-                    t.size.0 as i32,
-                    t.size.1 as i32,
-                    t.stride,
-                    t.format.unwrap(),
-                )
-            };
-            for &offset in slot_offsets {
+        let file = shm::memfd("wl-pick-capture", plan.total)?;
+        let pool = self
+            .shm
+            .create_pool(file.as_fd(), plan.total as i32, qh, ());
+        for (i, offsets) in plan.slots {
+            let t = &self.tiles[i];
+            let (w, h, stride) = (t.size.0 as i32, t.size.1 as i32, t.stride);
+            let format = t.format.expect("planned tiles have a format");
+            for offset in offsets {
                 let slot = self.tiles[i].slots.len();
                 let buffer = pool.create_buffer(offset as i32, w, h, stride, format, qh, (i, slot));
                 self.tiles[i].slots.push(Slot {
@@ -311,6 +333,27 @@ impl App {
         }
         pool.destroy(); // the buffers keep the mapping alive
         Ok(())
+    }
+
+    /// Lay out one pool: which tiles get buffers, at what offsets, and how big
+    /// the pool has to be. Only a tile that chose a format takes part.
+    fn plan_pool(&self, slots_for: impl Fn(&Tile) -> usize) -> PoolPlan {
+        const PAGE: usize = 4096;
+        let mut plan = PoolPlan::default();
+        for (i, tile) in self.tiles.iter().enumerate() {
+            if tile.format.is_none() {
+                continue;
+            }
+            let offsets = (0..slots_for(tile))
+                .map(|_| {
+                    let offset = plan.total;
+                    plan.total += tile.bytes().div_ceil(PAGE) * PAGE;
+                    offset
+                })
+                .collect();
+            plan.slots.push((i, offsets));
+        }
+        plan
     }
 
     /// Ask the compositor for one frame of window `i`, into a free slot.
@@ -366,6 +409,7 @@ impl App {
                 surface.attach(Some(&t.slots[slot].buffer), 0, 0);
                 surface.damage_buffer(0, 0, w, h);
                 surface.commit();
+                t.attached = Some(slot);
             }
             // Nothing was attached, so the old slot was never actually read.
             _ => {
@@ -416,7 +460,7 @@ impl App {
                 continue;
             }
             let t = &self.tiles[i];
-            if t.slots.is_empty() || t.frame.is_some() {
+            if t.session.is_none() || t.stale || t.slots.is_empty() || t.frame.is_some() {
                 continue;
             }
             if t.asked.is_some_and(|a| now.duration_since(a) < interval) {
@@ -442,14 +486,32 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, usize> for App {
             return;
         };
         match event {
+            // Constraints arrive once before the buffers are allocated, and
+            // again whenever the source changes size. The buffers cannot
+            // follow it, so after allocation a new size only marks the tile.
             ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => {
-                tile.size = (width, height)
+                if tile.slots.is_empty() {
+                    tile.size = (width, height);
+                } else if tile.size != (width, height) {
+                    tile.stale = true;
+                }
             }
             ext_image_copy_capture_session_v1::Event::ShmFormat {
                 format: WEnum::Value(f),
-            } => tile.formats.push(f),
+            } => {
+                if !tile.formats.contains(&f) {
+                    tile.formats.push(f);
+                }
+            }
             ext_image_copy_capture_session_v1::Event::Done => tile.session_done = true,
-            ext_image_copy_capture_session_v1::Event::Stopped => tile.settled = true,
+            // The source is gone. The protocol wants the session destroyed, and
+            // a frame can no longer be asked of it; the last one stays on show.
+            ext_image_copy_capture_session_v1::Event::Stopped => {
+                if let Some(session) = tile.session.take() {
+                    session.destroy();
+                }
+                tile.settled = true;
+            }
             _ => {}
         }
     }
@@ -484,8 +546,13 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, usize> for App {
                 }
             }
             ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
-                // Live mode retries on the next tick; only a failure with no
-                // frame yet leaves the tile without a thumbnail.
+                // Live mode retries on the next tick, except that a buffer the
+                // compositor has rejected for its size will be rejected again.
+                // Only a failure with no frame yet leaves the tile without a
+                // thumbnail.
+                if matches!(reason, WEnum::Value(FailureReason::BufferConstraints)) {
+                    tile.stale = true;
+                }
                 if tile.frames == 0 {
                     eprintln!(
                         "wl-pick: capture failed for {:?} ({reason:?})",

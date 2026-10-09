@@ -9,7 +9,9 @@
 //! is open or thirty — the overlay hugs whatever is there, and rows past the
 //! limit scroll.
 
-/// 0xAARRGGBB, premultiplied (everything here is opaque).
+/// 0xAARRGGBB with the colour premultiplied by the alpha, which is what a
+/// wl_shm ARGB8888 buffer holds. The defaults are all opaque; a translucent
+/// colour from the config arrives already premultiplied.
 pub type Argb = u32;
 
 pub struct Theme {

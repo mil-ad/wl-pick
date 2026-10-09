@@ -95,8 +95,11 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// Blend a solid span at `a/255` coverage, clipped to `clip`. Glyph spans
-    /// arrive this way: colour plus a coverage alpha.
+    /// Blend a solid span at `a/255` coverage over what is there, clipped to
+    /// `clip`. Glyph spans arrive this way: colour plus a coverage alpha. The
+    /// buffer is premultiplied, so the usual over operator applies to every
+    /// channel alike, alpha included -- an opaque backdrop stays opaque and a
+    /// translucent one stays translucent under the text.
     pub fn blend(&mut self, r: Rect, (sr, sg, sb, sa): (u8, u8, u8, u8), clip: Rect) {
         if sa == 0 {
             return;
@@ -110,12 +113,12 @@ impl<'a> Painter<'a> {
             let row = (y * self.w * 4) as usize;
             for x in x0..x1 {
                 let o = row + (x * 4) as usize;
-                // Argb8888 little-endian: B, G, R, A.
-                for (i, src) in [(0usize, sb), (1, sg), (2, sr)] {
+                // Argb8888 little-endian: B, G, R, A. The source colour is
+                // opaque text at `a` coverage, i.e. premultiplied it is c*a.
+                for (i, src) in [(0usize, sb), (1, sg), (2, sr), (3, 255)] {
                     let dst = self.px[o + i] as u32;
                     self.px[o + i] = ((src as u32 * a + dst * (255 - a)) / 255) as u8;
                 }
-                self.px[o + 3] = 255;
             }
         }
     }
