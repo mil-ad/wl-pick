@@ -14,14 +14,14 @@ use wayland_client::protocol::{
     wl_output::{self, WlOutput},
     wl_registry::WlRegistry,
     wl_seat::WlSeat,
-    wl_shm::WlShm,
+    wl_shm::{self, WlShm},
     wl_shm_pool::WlShmPool,
     wl_subcompositor::WlSubcompositor,
     wl_subsurface::WlSubsurface,
     wl_surface::WlSurface,
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
@@ -66,6 +66,9 @@ pub struct App {
     pub(crate) compositor: WlCompositor,
     pub(crate) subcompositor: WlSubcompositor,
     pub(crate) shm: WlShm,
+    /// The buffer formats wl_shm says it supports. Only XRGB8888 and ARGB8888
+    /// are guaranteed; a capture session may offer more than can be displayed.
+    pub(crate) shm_formats: Vec<wl_shm::Format>,
     pub(crate) viewporter: WpViewporter,
     pub(crate) layer_shell: ZwlrLayerShellV1,
     pub(crate) copy_mgr: ExtImageCopyCaptureManagerV1,
@@ -183,6 +186,7 @@ impl App {
             compositor: globals.bind(qh, 1..=6, ())?,
             subcompositor: globals.bind(qh, 1..=1, ())?,
             shm: globals.bind(qh, 1..=1, ())?,
+            shm_formats: Vec::new(),
             viewporter: globals.bind(qh, 1..=1, ())?,
             layer_shell: globals.bind(qh, 1..=5, ())?,
             copy_mgr: globals.bind(qh, 1..=1, ())?,
@@ -383,7 +387,24 @@ impl Dispatch<WlOutput, ()> for App {
 delegate_noop!(App: WlCompositor);
 delegate_noop!(App: WlSubcompositor);
 delegate_noop!(App: WlSubsurface);
-delegate_noop!(App: ignore WlShm);
+/// wl_shm announces its formats once, at bind time.
+impl Dispatch<WlShm, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &WlShm,
+        event: wl_shm::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_shm::Event::Format {
+            format: WEnum::Value(format),
+        } = event
+        {
+            app.shm_formats.push(format);
+        }
+    }
+}
 delegate_noop!(App: WlShmPool);
 delegate_noop!(App: WpViewporter);
 delegate_noop!(App: WpViewport);

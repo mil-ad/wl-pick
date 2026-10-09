@@ -61,6 +61,90 @@ pub struct Slot {
     pub(crate) busy: bool,
 }
 
+/// Pick a buffer format from what the capture session `offered`, and say how
+/// many bytes one of its pixels takes.
+///
+/// Byte order is the compositor's business on both ends -- we never read these
+/// pixels -- but the size of a pixel is ours, because the stride declared with
+/// the buffer has to match the format. XRGB8888 and ARGB8888 are the two every
+/// wl_shm supports, so they come first; otherwise take the first offer we can
+/// both measure and hand back for display, since what a session can capture
+/// into is not always what wl_shm can show.
+fn choose_format(
+    offered: &[wl_shm::Format],
+    supported: &[wl_shm::Format],
+) -> Option<(wl_shm::Format, i32)> {
+    offered
+        .iter()
+        .find(|f| matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888))
+        .or_else(|| {
+            offered
+                .iter()
+                .find(|f| bytes_per_pixel(**f).is_some() && supported.contains(f))
+        })
+        .and_then(|f| Some((*f, bytes_per_pixel(*f)?)))
+}
+
+/// How many bytes one pixel of `format` takes, for the formats whose rows are
+/// simply width times that.
+///
+/// A capture session may offer formats beyond the two wl_shm guarantees --
+/// deeper colour on an HDR or 10-bit output, say -- and they are not all four
+/// bytes wide. Declaring a four-byte stride for an eight-byte format is a
+/// protocol error that kills the connection, so anything not listed here is
+/// something we decline rather than guess at. Subsampled and multi-planar
+/// formats are absent deliberately: their rows are not width times a constant.
+fn bytes_per_pixel(format: wl_shm::Format) -> Option<i32> {
+    use wl_shm::Format;
+    Some(match format {
+        Format::C8 | Format::Rgb332 | Format::Bgr233 => 1,
+        Format::Xrgb4444
+        | Format::Xbgr4444
+        | Format::Rgbx4444
+        | Format::Bgrx4444
+        | Format::Argb4444
+        | Format::Abgr4444
+        | Format::Rgba4444
+        | Format::Bgra4444
+        | Format::Xrgb1555
+        | Format::Xbgr1555
+        | Format::Rgbx5551
+        | Format::Bgrx5551
+        | Format::Argb1555
+        | Format::Abgr1555
+        | Format::Rgba5551
+        | Format::Bgra5551
+        | Format::Rgb565
+        | Format::Bgr565 => 2,
+        Format::Rgb888 | Format::Bgr888 => 3,
+        Format::Xrgb8888
+        | Format::Xbgr8888
+        | Format::Rgbx8888
+        | Format::Bgrx8888
+        | Format::Argb8888
+        | Format::Abgr8888
+        | Format::Rgba8888
+        | Format::Bgra8888
+        | Format::Xrgb2101010
+        | Format::Xbgr2101010
+        | Format::Rgbx1010102
+        | Format::Bgrx1010102
+        | Format::Argb2101010
+        | Format::Abgr2101010
+        | Format::Rgba1010102
+        | Format::Bgra1010102 => 4,
+        Format::Xrgb16161616
+        | Format::Xbgr16161616
+        | Format::Argb16161616
+        | Format::Abgr16161616
+        | Format::Xrgb16161616f
+        | Format::Xbgr16161616f
+        | Format::Argb16161616f
+        | Format::Abgr16161616f => 8,
+        _ => return None,
+    })
+}
+
 pub struct Tile {
     pub(crate) target: Target,
 
@@ -73,6 +157,9 @@ pub struct Tile {
     pub(crate) showing: Option<usize>,
     pub(crate) formats: Vec<wl_shm::Format>,
     pub(crate) format: Option<wl_shm::Format>,
+    /// Bytes per row of the capture buffer, which depends on the format: a
+    /// stride that does not match is a protocol error, not a wrong picture.
+    pub(crate) stride: i32,
     /// Buffer size the session requires: the window's full resolution.
     pub(crate) size: (u32, u32),
     pub(crate) transform: wl_output::Transform,
@@ -100,6 +187,7 @@ impl Tile {
             showing: None,
             formats: Vec::new(),
             format: None,
+            stride: 0,
             size: (0, 0),
             transform: wl_output::Transform::Normal,
             session_done: false,
@@ -114,7 +202,7 @@ impl Tile {
     }
 
     pub fn bytes(&self) -> usize {
-        self.size.0 as usize * 4 * self.size.1 as usize
+        self.stride as usize * self.size.1 as usize
     }
 
     /// Whether the buffer's contents are turned on their side relative to the
@@ -178,6 +266,7 @@ impl App {
     /// touching it again.
     pub fn start_captures(&mut self, qh: &QueueHandle<Self>) -> Result<(), Box<dyn Error>> {
         const PAGE: usize = 4096;
+        let shm_formats = self.shm_formats.clone();
         let mut total = 0usize;
         let mut offsets: Vec<Vec<usize>> = Vec::with_capacity(self.tiles.len());
         for tile in &mut self.tiles {
@@ -189,19 +278,16 @@ impl App {
                 tile.settled = true;
                 continue;
             }
-            // Any 32-bit format will do: we never read these pixels, we hand the
-            // buffer straight back for display, so byte order stays the
-            // compositor's business on both ends.
-            tile.format = tile
-                .formats
-                .iter()
-                .copied()
-                .find(|f| matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888))
-                .or_else(|| tile.formats.first().copied());
-            if tile.format.is_none() {
+            let Some((format, bytes)) = choose_format(&tile.formats, &shm_formats) else {
+                eprintln!(
+                    "wl-pick: no usable buffer format for {:?} (offered {:?})",
+                    tile.target.title, tile.formats
+                );
                 tile.settled = true;
                 continue;
-            }
+            };
+            tile.format = Some(format);
+            tile.stride = tile.size.0 as i32 * bytes;
             // Only a tile that will be re-captured needs a second buffer, and a
             // display's is the size of the whole screen.
             let slots = if self.live == Live::None || tile.target.kind == Kind::Output {
@@ -225,16 +311,21 @@ impl App {
         let file = shm::memfd("wl-pick-capture", total)?;
         let pool = self.shm.create_pool(file.as_fd(), total as i32, qh, ());
         for (i, slot_offsets) in offsets.iter().enumerate() {
-            let (w, h, format) = {
+            let (w, h, stride, format) = {
                 let t = &self.tiles[i];
                 if t.settled || t.session.is_none() || t.format.is_none() {
                     continue;
                 }
-                (t.size.0 as i32, t.size.1 as i32, t.format.unwrap())
+                (
+                    t.size.0 as i32,
+                    t.size.1 as i32,
+                    t.stride,
+                    t.format.unwrap(),
+                )
             };
             for &offset in slot_offsets {
                 let slot = self.tiles[i].slots.len();
-                let buffer = pool.create_buffer(offset as i32, w, h, w * 4, format, qh, (i, slot));
+                let buffer = pool.create_buffer(offset as i32, w, h, stride, format, qh, (i, slot));
                 self.tiles[i].slots.push(Slot {
                     buffer,
                     busy: false,
@@ -476,5 +567,97 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
             app.tick(qh);
             app.arm_frame_callback(qh);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wl_shm::Format;
+
+    /// Everything wl_shm here advertises, plus the two it must.
+    fn supported() -> Vec<Format> {
+        vec![
+            Format::Argb8888,
+            Format::Xrgb8888,
+            Format::Xbgr8888,
+            Format::Bgr888,
+            Format::Xrgb2101010,
+            Format::Abgr16161616f,
+            Format::Xbgr16161616f,
+        ]
+    }
+
+    #[test]
+    fn the_guaranteed_formats_win() {
+        // Both are four bytes, and every wl_shm has them, so they are picked
+        // over anything else on offer however the session orders them.
+        let offered = [Format::Abgr16161616f, Format::Bgr888, Format::Xrgb8888];
+        assert_eq!(
+            choose_format(&offered, &supported()),
+            Some((Format::Xrgb8888, 4))
+        );
+    }
+
+    /// wlroots' own rule, from pixel_format_info_check_stride: a stride must
+    /// be a whole number of pixels and cover the width.
+    fn wlroots_accepts(stride: i32, width: i32, bytes: i32) -> bool {
+        stride % bytes == 0 && stride >= width * bytes
+    }
+
+    #[test]
+    fn the_declared_stride_matches_the_format() {
+        // The reported bug: a session offering neither XRGB8888 nor ARGB8888
+        // fell through to whatever came first, with a stride of four bytes a
+        // pixel regardless. A 3830-wide window then declared 15320, which is
+        // too small for an eight-byte format and not a whole number of
+        // three-byte ones -- "Invalid stride (15320)", and the connection dies.
+        let width = 3830;
+        for (format, bytes) in [
+            (Format::Bgr888, 3),
+            (Format::Xbgr8888, 4),
+            (Format::Abgr16161616f, 8),
+        ] {
+            let (chosen, chosen_bytes) =
+                choose_format(&[format], &supported()).unwrap_or_else(|| panic!("{format:?}"));
+            assert_eq!((chosen, chosen_bytes), (format, bytes));
+            assert!(
+                wlroots_accepts(width * chosen_bytes, width, bytes),
+                "{format:?} stride {} rejected",
+                width * chosen_bytes
+            );
+        }
+
+        // And the old formula is what fails, for the formats that are not four
+        // bytes wide.
+        assert!(!wlroots_accepts(width * 4, width, 3), "15320 for BGR888");
+        assert!(!wlroots_accepts(width * 4, width, 8), "15320 for ABGR16F");
+        assert!(wlroots_accepts(width * 4, width, 4), "four bytes was fine");
+    }
+
+    #[test]
+    fn formats_we_cannot_measure_are_declined() {
+        // Multi-planar and subsampled rows are not width times a constant, and
+        // a format wl_shm never advertised cannot be shown even if the session
+        // can capture into it. Refusing costs one tile its thumbnail; guessing
+        // costs the whole connection.
+        assert_eq!(choose_format(&[Format::Nv12], &supported()), None);
+        assert_eq!(choose_format(&[Format::Yuv420], &supported()), None);
+        assert_eq!(choose_format(&[], &supported()), None);
+        assert_eq!(
+            choose_format(&[Format::Abgr16161616f], &[Format::Xrgb8888]),
+            None,
+            "offered but not displayable"
+        );
+    }
+
+    #[test]
+    fn pixel_sizes_match_the_names() {
+        assert_eq!(bytes_per_pixel(Format::Rgb332), Some(1));
+        assert_eq!(bytes_per_pixel(Format::Rgb565), Some(2));
+        assert_eq!(bytes_per_pixel(Format::Bgr888), Some(3));
+        assert_eq!(bytes_per_pixel(Format::Xrgb2101010), Some(4));
+        assert_eq!(bytes_per_pixel(Format::Xbgr16161616f), Some(8));
+        assert_eq!(bytes_per_pixel(Format::Nv12), None);
     }
 }
